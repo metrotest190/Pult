@@ -1,0 +1,3 @@
+../Modules/modbus/port/portevent.c:37:6:xMBPortEventInit	1
+../Modules/modbus/port/portevent.c:46:6:xMBPortEventPost	1
+../Modules/modbus/port/portevent.c:56:6:xMBPortEventGet	2

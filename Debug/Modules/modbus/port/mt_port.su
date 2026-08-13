@@ -1,0 +1,4 @@
+../Modules/modbus/port/mt_port.c:29:6:EnterCriticalSection	4	static,ignoring_inline_asm
+../Modules/modbus/port/mt_port.c:38:6:ExitCriticalSection	4	static,ignoring_inline_asm
+../Modules/modbus/port/mt_port.c:51:6:MT_PORT_SetTimerModule	16	static
+../Modules/modbus/port/mt_port.c:59:6:MT_PORT_SetUartModule	16	static
