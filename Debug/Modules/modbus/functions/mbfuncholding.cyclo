@@ -1,4 +1,0 @@
-../Modules/modbus/functions/mbfuncholding.c:76:1:eMBFuncWriteHoldingRegister	3
-../Modules/modbus/functions/mbfuncholding.c:108:1:eMBFuncWriteMultipleHoldingRegister	6
-../Modules/modbus/functions/mbfuncholding.c:167:1:eMBFuncReadHoldingRegister	5
-../Modules/modbus/functions/mbfuncholding.c:231:1:eMBFuncReadWriteMultipleHoldingRegister	10
