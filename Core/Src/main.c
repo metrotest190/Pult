@@ -60,6 +60,9 @@ typedef enum {
 
 #define GRAPH_WIDTH 320
 
+// Антидребезг кнопок (мс). Опрос портов TIM4/DMA — 1 кГц
+#define DEBOUNCE_MS 20
+
 // === КРИТИЧЕСКИЕ СЕКЦИИ ДЛЯ ЗАЩИТЫ ОТ ГОНОК ===
 #define CRITICAL_SECTION_ENTER() __disable_irq()
 #define CRITICAL_SECTION_EXIT()  __enable_irq()
@@ -594,9 +597,9 @@ static void MX_TIM4_Init(void)
   /* USER CODE BEGIN TIM4_Init 1 */
   /* USER CODE END TIM4_Init 1 */
   htim4.Instance = TIM4;
-  htim4.Init.Prescaler = 7199;
+  htim4.Init.Prescaler = 71;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 499;
+  htim4.Init.Period = 999;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
@@ -746,8 +749,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : Encoder_down_Pin Encoder_up_Pin Protect_Pin Start_Pin */
-  GPIO_InitStruct.Pin = Encoder_down_Pin|Encoder_up_Pin|Protect_Pin|Start_Pin;
+  /*Configure GPIO pins : Encoder_down_Pin Encoder_up_Pin */
+  GPIO_InitStruct.Pin = Encoder_down_Pin|Encoder_up_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : Protect_Pin Start_Pin */
+  GPIO_InitStruct.Pin = Protect_Pin|Start_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
@@ -801,33 +810,21 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
     eMBErrorCode eStatus = MB_ENOERR;
     int iRegIndex;
 
-    // 1. Обработка специальных регистров 0x4000-0x4002
-    if (usAddress >= 0x4000 && usAddress + usNRegs <= 0x4003) {
-        USHORT regAddr = usAddress;
-        while (usNRegs > 0) {
-            if (regAddr == 0x4002) {
-                if (eMode == MB_REG_READ) {
-                    int16_t val = fast_cmd_value;
-                    *pucRegBuffer++ = (UCHAR)(val >> 8);
-                    *pucRegBuffer++ = (UCHAR)(val & 0xFF);
-                } else {
-                    uint8_t high_byte = *pucRegBuffer++;
-                    uint8_t low_byte = *pucRegBuffer++;
-                    int16_t val = (int16_t)((high_byte << 8) | low_byte);
+    // 1. Специальный регистр 0x4002 — быстрая команда (int16).
+    //    ИСПРАВЛЕНИЕ: 0x4000-0x4001 существуют ТОЛЬКО в пространстве Input Registers (ф. 04);
+    //    в Holding-пространстве их нет — раньше здесь возвращались ложные нули.
+    if (usAddress == 0x4002 && usNRegs == 1) {
+        if (eMode == MB_REG_READ) {
+            int16_t val = fast_cmd_value;
+            *pucRegBuffer++ = (UCHAR)(val >> 8);
+            *pucRegBuffer++ = (UCHAR)(val & 0xFF);
+        } else {
+            uint8_t high_byte = *pucRegBuffer++;
+            uint8_t low_byte = *pucRegBuffer++;
+            int16_t val = (int16_t)((high_byte << 8) | low_byte);
 
-                    fast_cmd_value = val;
-                    fast_btn_pressed = (val != 0) ? 1 : 0;
-                }
-            } else {
-                if (eMode == MB_REG_READ) {
-                    *pucRegBuffer++ = 0;
-                    *pucRegBuffer++ = 0;
-                } else {
-                    pucRegBuffer += 2;
-                }
-            }
-            regAddr++;
-            usNRegs--;
+            fast_cmd_value = val;
+            fast_btn_pressed = (val != 0) ? 1 : 0;
         }
         return MB_ENOERR;
     }
@@ -907,10 +904,36 @@ eMBErrorCode eMBRegDiscreteCB(UCHAR *pucRegBuffer, USHORT usAddress,
     return MB_ENOREG;
 }
 void ProcessButtons(void) {
-    uint16_t current_A = (~input_buffer_A[0]) & PORT_A_MASK;
-    uint16_t current_B_raw = (~input_buffer_B[0]) & PORT_B_MASK;
+    uint16_t raw_A = (~input_buffer_A[0]) & PORT_A_MASK;
+    uint16_t raw_B = (~input_buffer_B[0]) & PORT_B_MASK;
 
-    ProcessEncoder(current_B_raw);
+    ProcessEncoder(raw_B);
+
+    // === ИСПРАВЛЕНИЕ: антидребезг по времени — новое состояние порта принимается
+    // только если оно держится без изменений не меньше DEBOUNCE_MS ===
+    static uint16_t stable_A = 0;
+    static uint16_t stable_B = 0;
+    static uint16_t cand_A = 0;
+    static uint16_t cand_B = 0;
+    static uint32_t cand_since_A = 0;
+    static uint32_t cand_since_B = 0;
+
+    if (raw_A != cand_A) {
+        cand_A = raw_A;
+        cand_since_A = HAL_GetTick();
+    } else if ((cand_A != stable_A) && ((HAL_GetTick() - cand_since_A) >= DEBOUNCE_MS)) {
+        stable_A = cand_A;
+    }
+
+    if (raw_B != cand_B) {
+        cand_B = raw_B;
+        cand_since_B = HAL_GetTick();
+    } else if ((cand_B != stable_B) && ((HAL_GetTick() - cand_since_B) >= DEBOUNCE_MS)) {
+        stable_B = cand_B;
+    }
+
+    uint16_t current_A = stable_A;
+    uint16_t current_B_raw = stable_B;
 
     // Используем корректную маску (включает кнопку PB12, исключает A/B энкодера)
     uint16_t current_B = current_B_raw & PORT_B_BUTTON_MASK;
@@ -930,11 +953,13 @@ void ProcessButtons(void) {
             case 3:  tjc_send_val("p6", "pic", 17); break;
             case 6:
                 tjc_send_val("p6", "pic", 15);
-                fast_cmd_value = 5; fast_btn_pressed = 1; encoder_value = 0;
+                // ИСПРАВЛЕНИЕ: Jog больше не сбрасывает позицию энкодера
+                fast_cmd_value = 5; fast_btn_pressed = 1;
                 break;
             case 7:
                 tjc_send_val("p6", "pic", 18);
-                fast_cmd_value = -5; fast_btn_pressed = 1; encoder_value = 0;
+                // ИСПРАВЛЕНИЕ: Jog больше не сбрасывает позицию энкодера
+                fast_cmd_value = -5; fast_btn_pressed = 1;
                 break;
             case 8:  tjc_send_val("p6", "pic", 20); break;
             case 11: tjc_send_val("p6", "pic", 19); break;
