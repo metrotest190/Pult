@@ -161,68 +161,6 @@ void tjc_send_val(char* objname, char* attribute, int val) {
     uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
 }
 
-void tjc_send_float(char* objname, char* attribute, float val, int decimals)
-{
-    uart_send_string(objname);
-    uart_send_char('.');
-    uart_send_string(attribute);
-    uart_send_char('=');
-
-    char txt[20];
-    int idx = 0;
-
-    if (val < 0) {
-        txt[idx++] = '-';
-        val = -val;
-    }
-
-    uint32_t intPart = (uint32_t)val;
-    float fracPart = val - (float)intPart;
-
-    // Вычисляем множитель для дробной части
-    uint32_t fracMult = 1;
-    for (int i = 0; i < decimals; i++) fracMult *= 10;
-
-    // Округляем дробную часть
-    uint32_t frac = (uint32_t)(fracPart * (float)fracMult + 0.5f);
-
-    // Обработка переполнения (например, 1.99 при 1 знаке округлится до 2.0)
-    if (frac >= fracMult) {
-        intPart++;
-        frac = 0;
-    }
-
-    char intBuf[12];
-    int intLen = 0;
-    if (intPart == 0) {
-        intBuf[intLen++] = '0';
-    } else {
-        while (intPart > 0) {
-            intBuf[intLen++] = (intPart % 10) + '0';
-            intPart /= 10;
-        }
-    }
-    for (int i = intLen - 1; i >= 0; i--) {
-        txt[idx++] = intBuf[i];
-    }
-
-    if (decimals > 0) {
-        txt[idx++] = '.';
-        char fracBuf[12];
-        for (int i = 0; i < decimals; i++) {
-            fracBuf[i] = (frac % 10) + '0';
-            frac /= 10;
-        }
-        for (int i = decimals - 1; i >= 0; i--) {
-            txt[idx++] = fracBuf[i];
-        }
-    }
-
-    txt[idx] = '\0';
-    uart_send_string(txt);
-    uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
-}
-
 void tjc_send_nstring(char* str, unsigned char str_length) {
     for (int var = 0; var < str_length; ++var) {
         uart_send_char(*str++);
@@ -319,11 +257,6 @@ uint16_t getRingBufferLength() {
     uint16_t length = ringBuffer.Length;
     mb_irq_restore(primask);
     return length;
-}
-
-// Имя функции изменено на логически верное (возвращает 1, если есть место)
-uint8_t isRingBufferNotFull() {
-    return ringBuffer.Length < RINGBUFFER_LEN;
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {

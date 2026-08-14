@@ -18,7 +18,6 @@ extern UART_HandleTypeDef huart3;
 void tjc_send_string(char* str);
 void tjc_send_txt(char* objname, char* attribute, char* txt);
 void tjc_send_val(char* objname, char* attribute, int val);
-void tjc_send_float(char* objname, char* attribute, float val, int decimals);
 void tjc_send_nstring(char* str, unsigned char str_length);
 void tjc_flush_tx(void);
 uint8_t tjc_tx_is_busy(void);
@@ -39,7 +38,6 @@ uint8_t read1ByteFromRingBuffer(uint16_t position);
 #define u(x) read1ByteFromRingBuffer(x)
 
 extern uint8_t RxBuffer[1];
-extern uint32_t msTicks;
 
 
 #endif

@@ -13,7 +13,6 @@
 #include "mt_port.h"
 #include "tjc_usart_hmi.h"
 #include <stdbool.h>
-#define FRAME_LENGTH 7
 #define SIZE 1
 /* USER CODE END Includes */
 
@@ -34,13 +33,9 @@ typedef enum {
 } SystemState_t;
 
 #define HISTORY_LEN 320
-#define GRAPH_ID 1
 
 #define TJC_CMD_HEADER_0  0x55
 #define TJC_CMD_HEADER_1  0xAA
-
-volatile uint16_t realtime_state_A = 0;
-volatile uint16_t realtime_state_B = 0;
 
 // --- ВОЗВРАЩАЕМ ИСХОДНУЮ АДРЕСАЦИЮ ---
 #define REG_INPUT_START 0x4000
@@ -72,7 +67,6 @@ volatile uint16_t realtime_state_B = 0;
 // === ВОЛАТИЛЬНЫЕ ПЕРЕМЕННЫЕ (общие между прерываниями и основным циклом) ===
 static volatile int16_t fast_cmd_value = 0;
 static volatile uint8_t fast_btn_pressed = 0;
-static volatile int16_t last_fast_cmd_value = 0;
 static volatile uint8_t encoder_btn_pressed = 0;
 /* USER CODE END PD */
 
@@ -116,8 +110,6 @@ static float zoom[3] = {1.0f, 1.0f, 1.0f};
 static float offset[3] = {0.0f, 0.0f, 0.0f};
 
 volatile int pin;
-volatile uint16_t latch_buffer_A = 0;
-volatile uint16_t latch_buffer_B = 0;
 
 volatile uint16_t input_buffer_A[SIZE];
 volatile uint16_t input_buffer_B[SIZE];
@@ -217,6 +209,8 @@ void SwitchTechnology_Logic(void) {
                     graph_prev_visible[i] = 0;
                 } else if (is_visible && !graph_prev_visible[i]) {
                     graph_prev_visible[i] = 1;
+                    // ИСПРАВЛЕНИЕ: при возврате канала на экран перерисовываем всю историю
+                    redraw_queue |= (1 << i);
                 }
 
                 graph_history[i][graph_head[i]] = vals[i];
@@ -328,7 +322,8 @@ void SwitchTechnology_Logic(void) {
             uint16_t len = getRingBufferLength();
             if (len > 0) {
                 if (read1ByteFromRingBuffer(0) == 0xFE) {
-                    deleteRingBuffer(len);
+                    // ИСПРАВЛЕНИЕ: удаляем только 0xFE, сохраняя команды экрана (0x55 0xAA)
+                    deleteRingBuffer(1);
                     currentState = STATE_ADDT_SEND_DATA;
                 } else {
                     deleteRingBuffer(1);
@@ -374,7 +369,8 @@ void SwitchTechnology_Logic(void) {
                 uint16_t len = getRingBufferLength();
                 if (len > 0) {
                     if (read1ByteFromRingBuffer(0) == 0xFD) {
-                        deleteRingBuffer(len);
+                        // ИСПРАВЛЕНИЕ: удаляем только 0xFD, сохраняя команды экрана
+                        deleteRingBuffer(1);
                         addt_busy = 0; // Экран свободен
                         lastSendTime = HAL_GetTick(); // Синхронизируем таймер
                     } else {
@@ -870,9 +866,6 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
 
         case MB_REG_WRITE:
         {
-            int start_idx = iRegIndex;
-            int end_idx = iRegIndex + usNRegs - 1;
-
             while (usNRegs > 0) {
                 uint8_t high_byte = *pucRegBuffer++;
                 uint8_t low_byte = *pucRegBuffer++;
@@ -882,19 +875,13 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
                 usNRegs--;
             }
 
-            // === Конвертация IEEE 754 float (2 регистра на float) ===
-            if (start_idx <= 0 && end_idx >= 1) {
-                holdingFloat0.u32 = ((uint32_t)usRegHoldingBuf[0] << 16) | usRegHoldingBuf[1];
-            }
-            if (start_idx <= 2 && end_idx >= 3) {
-                holdingFloat1.u32 = ((uint32_t)usRegHoldingBuf[2] << 16) | usRegHoldingBuf[3];
-            }
-            if (start_idx <= 4 && end_idx >= 5) {
-                holdingFloat2.u32 = ((uint32_t)usRegHoldingBuf[4] << 16) | usRegHoldingBuf[5];
-            }
-            if (start_idx <= 6 && end_idx >= 7) {
-                holdingFloat3.u32 = ((uint32_t)usRegHoldingBuf[6] << 16) | usRegHoldingBuf[7];
-            }
+            // === ИСПРАВЛЕНИЕ: после ЛЮБОЙ записи пересчитываем все float из буфера ===
+            // Раньше float обновлялся только при записи полной пары регистров,
+            // из-за чего частичная запись давала рассинхрон буфера и float.
+            holdingFloat0.u32 = ((uint32_t)usRegHoldingBuf[0] << 16) | usRegHoldingBuf[1];
+            holdingFloat1.u32 = ((uint32_t)usRegHoldingBuf[2] << 16) | usRegHoldingBuf[3];
+            holdingFloat2.u32 = ((uint32_t)usRegHoldingBuf[4] << 16) | usRegHoldingBuf[5];
+            holdingFloat3.u32 = ((uint32_t)usRegHoldingBuf[6] << 16) | usRegHoldingBuf[7];
             break;
         }
         }
@@ -933,26 +920,28 @@ void ProcessButtons(void) {
     uint16_t released_A = last_portA & (~current_A);
     uint16_t released_B = last_portB & (~current_B);
 
-    // === ИСПРАВЛЕНИЕ: проверка pressed_A != 0 перед __builtin_ctz ===
-    if (pressed_A) {
-        pin = __builtin_ctz(pressed_A);  // Безопасно: pressed_A != 0
+    // === ИСПРАВЛЕНИЕ: обрабатываем ВСЕ нажатые кнопки (не только младший бит) ===
+    uint16_t maskA = pressed_A;
+    while (maskA) {
+        pin = __builtin_ctz(maskA);
         switch (pin) {
             case 1:  break;
             case 2:  break;
             case 3:  tjc_send_val("p6", "pic", 17); break;
             case 6:
                 tjc_send_val("p6", "pic", 15);
-                fast_cmd_value = 5; fast_btn_pressed = 1; last_fast_cmd_value = 5; encoder_value = 0;
+                fast_cmd_value = 5; fast_btn_pressed = 1; encoder_value = 0;
                 break;
             case 7:
                 tjc_send_val("p6", "pic", 18);
-                fast_cmd_value = -5; fast_btn_pressed = 1; last_fast_cmd_value = -5; encoder_value = 0;
+                fast_cmd_value = -5; fast_btn_pressed = 1; encoder_value = 0;
                 break;
             case 8:  tjc_send_val("p6", "pic", 20); break;
             case 11: tjc_send_val("p6", "pic", 19); break;
             case 12: tjc_send_val("p6", "pic", 22); break;
             case 15: tjc_send_val("p6", "pic", 24); break;
         }
+        maskA &= (uint16_t)(maskA - 1);  // Сбрасываем младший установленный бит
     }
 
     if (released_A & (1 << 6)) {
@@ -967,9 +956,10 @@ void ProcessButtons(void) {
         tjc_send_val("p6", "pic", 27);
     }
 
-    // === ИСПРАВЛЕНИЕ: проверка pressed_B != 0 перед __builtin_ctz ===
-    if (pressed_B) {
-        pin = __builtin_ctz(pressed_B);  // Безопасно: pressed_B != 0
+    // === ИСПРАВЛЕНИЕ: обрабатываем ВСЕ нажатые кнопки (не только младший бит) ===
+    uint16_t maskB = pressed_B;
+    while (maskB) {
+        pin = __builtin_ctz(maskB);
         switch (pin) {
             case 3:  tjc_send_val("p6", "pic", 21); break;
             case 8:  tjc_send_val("p6", "pic", 26); break;
@@ -977,6 +967,7 @@ void ProcessButtons(void) {
             case 12: encoder_btn_pressed = 1; encoder_value = 0; break;
             case 15: tjc_send_val("p6", "pic", 16); break;
         }
+        maskB &= (uint16_t)(maskB - 1);  // Сбрасываем младший установленный бит
     }
 
     last_portA = current_A;
@@ -1011,14 +1002,12 @@ void ProcessEncoder(uint16_t current_B_raw) {
             case 0b0001: case 0b0111: case 0b1110: case 0b1000:
                 if (encoder_value > -5) {
                     encoder_value--;
-                    last_fast_cmd_value = 0;
                     tjc_send_val("p6", "pic", 18);
                 }
                 break;
             case 0b0010: case 0b1011: case 0b1101: case 0b0100:
                 if (encoder_value < 5) {
                     encoder_value++;
-                    last_fast_cmd_value = 0;
                     tjc_send_val("p6", "pic", 15);
                 }
                 break;
