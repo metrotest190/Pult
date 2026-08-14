@@ -209,11 +209,11 @@ void SysTick_Handler(void)
 void DMA1_Channel1_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
-    // Прерывание от DMA1_Channel1 (TIM4_UPDATE -> Порт A)
-    if (__HAL_DMA_GET_FLAG(&hdma_tim4_up, DMA_FLAG_TC1)) {
-        __HAL_DMA_CLEAR_FLAG(&hdma_tim4_up, DMA_FLAG_TC1);
+    // Прерывание от DMA1_Channel1 (TIM4_CH1 -> Порт B)
+    if (__HAL_DMA_GET_FLAG(&hdma_tim4_ch1, DMA_FLAG_TC1)) {
+        __HAL_DMA_CLEAR_FLAG(&hdma_tim4_ch1, DMA_FLAG_TC1);
         // Перезапускаем DMA в циклическом режиме
-        HAL_DMA_Start(&hdma_tim4_up, (uint32_t)&GPIOA->IDR, (uint32_t)input_buffer_A, SIZE);
+        HAL_DMA_Start(&hdma_tim4_ch1, (uint32_t)&GPIOB->IDR, (uint32_t)input_buffer_B, SIZE);
     }
   /* USER CODE END DMA1_Channel1_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_tim4_ch1);
@@ -228,11 +228,11 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel7_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel7_IRQn 0 */
-    // Прерывание от DMA1_Channel7 (TIM4_CH1 -> Порт B)
-    if (__HAL_DMA_GET_FLAG(&hdma_tim4_ch1, DMA_FLAG_TC7)) {
-        __HAL_DMA_CLEAR_FLAG(&hdma_tim4_ch1, DMA_FLAG_TC7);
+    // Прерывание от DMA1_Channel7 (TIM4_UPDATE -> Порт A)
+    if (__HAL_DMA_GET_FLAG(&hdma_tim4_up, DMA_FLAG_TC7)) {
+        __HAL_DMA_CLEAR_FLAG(&hdma_tim4_up, DMA_FLAG_TC7);
         // Перезапускаем DMA в циклическом режиме
-        HAL_DMA_Start(&hdma_tim4_ch1, (uint32_t)&GPIOB->IDR, (uint32_t)input_buffer_B, SIZE);
+        HAL_DMA_Start(&hdma_tim4_up, (uint32_t)&GPIOA->IDR, (uint32_t)input_buffer_A, SIZE);
     }
   /* USER CODE END DMA1_Channel7_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_tim4_up);

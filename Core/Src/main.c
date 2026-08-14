@@ -159,15 +159,6 @@ extern void ProcessEncoder(uint16_t current_B_raw);
 extern void tjc_flush_tx(void);
 extern uint8_t tjc_tx_is_busy(void);
 
-/* USER CODE BEGIN PFP */
-extern void intToStr(int num, char* str);
-extern void uart_send_char(char ch);
-extern void uart_send_string(char* str);
-extern void ProcessButtons(void);
-extern void ProcessEncoder(uint16_t current_B_raw);
-extern void tjc_flush_tx(void);
-extern uint8_t tjc_tx_is_busy(void);
-
 // === ДОБАВЬТЕ ЭТУ ФУНКЦИЮ СЮДА (ПЕРЕД SwitchTechnology_Logic) ===
 void ParseTjcCommands(void) {
     while (getRingBufferLength() >= 4) {
@@ -417,7 +408,6 @@ void SwitchTechnology_Logic(void) {
             break;
     }
 }
-/* USER CODE END PFP */
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
