@@ -1,131 +1,157 @@
-/* ... (Оставляем ваши комментарии и инклуды без изменений) ... */
 #include "port.h"
 #include "mb.h"
 #include "mbport.h"
 #include "stm32f1xx_hal.h"
 #include "main.h"
 #include "stm32f1xx_hal_uart.h"
-#include <stdio.h>
 #include <limits.h>
 #include "tjc_usart_hmi.h"
 
 /* ----------------------- Static functions ---------------------------------*/
-static void prvvUARTTxReadyISR( void );
-static void prvvUARTRxISR( void );
-static uint32_t mb_irq_save_disable(void);
-static void mb_irq_restore(uint32_t primask);
+static void prvvUARTTxReadyISR(void);
+static void prvvUARTRxISR(void);
+static uint32_t irq_save_disable(void);
+static void irq_restore(uint32_t primask);
 
 /* ----------------------- Variables ----------------------------------------*/
-extern UART_HandleTypeDef* modbusUart;
-uint8_t txByte = 0x00;
-uint8_t rxByte = 0x00;
+extern UART_HandleTypeDef *modbusUart;
 
-#define TJC_TX_BUF_SIZE 512
+static uint8_t txByte;
+static uint8_t rxByte;
+
+#define TJC_TX_BUF_SIZE 512U
 static uint8_t tjc_tx_buf_a[TJC_TX_BUF_SIZE];
 static uint8_t tjc_tx_buf_b[TJC_TX_BUF_SIZE];
-static uint8_t* tjc_active_buf = tjc_tx_buf_a;
-static volatile uint16_t tjc_tx_len = 0;
-static volatile uint8_t  tjc_tx_busy = 0;
+static uint8_t *tjc_active_buf = tjc_tx_buf_a;
+static volatile uint16_t tjc_tx_len;
+static volatile uint8_t tjc_tx_busy;
+static volatile uint8_t tjc_tx_overflow;
+volatile uint32_t tjc_tx_error_count;
 
+/* TJC RX is produced in USART3 IRQ and consumed in the foreground. */
 typedef struct
 {
     uint16_t Head;
     uint16_t Tail;
     uint16_t Length;
-    uint8_t  Ring_data[RINGBUFFER_LEN];
+    uint8_t Ring_data[RINGBUFFER_LEN];
 } RingBuffer_t;
 
-RingBuffer_t ringBuffer;
+static RingBuffer_t ringBuffer;
 uint8_t RxBuffer[1];
 
-static uint32_t mb_irq_save_disable(void)
+static uint32_t irq_save_disable(void)
 {
-    uint32_t primask = __get_PRIMASK();
+    const uint32_t primask = __get_PRIMASK();
     __disable_irq();
     return primask;
 }
 
-static void mb_irq_restore(uint32_t primask)
+static void irq_restore(uint32_t primask)
 {
     __set_PRIMASK(primask);
 }
 
-void intToStr(int num, char* str) {
-    if (str == NULL) return;
-    int i = 0;
-    int isNegative = 0;
-    unsigned int absNum = 0;
+void intToStr(int num, char *str)
+{
+    if (str == NULL) {
+        return;
+    }
 
-    if (num < 0) {
-        isNegative = 1;
+    int i = 0;
+    const int isNegative = (num < 0);
+    unsigned int absNum;
+
+    if (isNegative) {
+        /* This expression is also safe for INT_MIN. */
         absNum = (unsigned int)(-(num + 1)) + 1U;
     } else {
         absNum = (unsigned int)num;
     }
 
     do {
-        str[i++] = (char)((absNum % 10U) + '0');
+        str[i++] = (char)((absNum % 10U) + (unsigned int)'0');
         absNum /= 10U;
     } while (absNum != 0U);
 
-    if (isNegative) str[i++] = '-';
+    if (isNegative) {
+        str[i++] = '-';
+    }
     str[i] = '\0';
 
-    int start = 0;
-    int end = i - 1;
-    while (start < end) {
-        char temp = str[start];
+    for (int start = 0, end = i - 1; start < end; ++start, --end) {
+        const char temp = str[start];
         str[start] = str[end];
         str[end] = temp;
-        start++;
-        end--;
     }
 }
 
+/*
+ * Commands are accumulated in the inactive software buffer. If it overflows,
+ * the whole pending batch is discarded by tjc_flush_tx() rather than sending a
+ * partial TJC command without its terminating 0xFF bytes.
+ */
 void uart_send_char(char ch)
 {
-    // Добавляем защиту от переполнения. Если буфер полон, ждем освобождения (с таймаутом)
-    uint32_t timeout = HAL_GetTick() + 10;
-    while (tjc_tx_len >= TJC_TX_BUF_SIZE && HAL_GetTick() < timeout) {
-        // Буфер полон, ждем пока DMA/IT не отправит данные.
-        // Это предотвращает потерю байт завершения команды 0xFF.
+    const uint32_t primask = irq_save_disable();
+
+    if (tjc_tx_overflow == 0U) {
+        if (tjc_tx_len < TJC_TX_BUF_SIZE) {
+            tjc_active_buf[tjc_tx_len++] = (uint8_t)ch;
+        } else {
+            tjc_tx_overflow = 1U;
+            tjc_tx_error_count++;
+        }
     }
-    if (tjc_tx_len < TJC_TX_BUF_SIZE) {
-        tjc_active_buf[tjc_tx_len++] = (uint8_t)ch;
-    }
+
+    irq_restore(primask);
 }
 
-void uart_send_string(char* str)
+void uart_send_string(char *str)
 {
-    while(str != NULL && *str != 0) {
+    while ((str != NULL) && (*str != '\0')) {
         uart_send_char(*str++);
     }
 }
 
-void tjc_flush_tx(void)
+/*
+ * Starts a transfer only when USART3 is idle. It never waits and never changes
+ * UART_HandleTypeDef fields. A failed start drops the complete pending batch;
+ * this is preferable to mixing its bytes with commands generated on a retry.
+ */
+uint8_t tjc_flush_tx(void)
 {
-    if (tjc_tx_len == 0) return;
+    const uint32_t primask = irq_save_disable();
 
-    // Ждем завершения предыдущей передачи, но с таймаутом, чтобы не зависнуть навсегда
-    uint32_t timeout = HAL_GetTick() + 100;
-    while (tjc_tx_busy && HAL_GetTick() < timeout) {}
-
-    uint8_t* send_buf = tjc_active_buf;
-    uint16_t send_len = tjc_tx_len;
-
-    if (send_buf == tjc_tx_buf_a) {
-        tjc_active_buf = tjc_tx_buf_b;
-    } else {
-        tjc_active_buf = tjc_tx_buf_a;
+    if (tjc_tx_overflow != 0U) {
+        tjc_tx_len = 0U;
+        tjc_tx_overflow = 0U;
+        irq_restore(primask);
+        return 0U;
     }
-    tjc_tx_len = 0;
-    tjc_tx_busy = 1;
 
-    // Если передача не стартовала (ошибка UART), снимаем флаг занятости, чтобы не зависнуть
-    if (HAL_UART_Transmit_IT(&TJC_UART, send_buf, send_len) != HAL_OK) {
-        tjc_tx_busy = 0;
-        TJC_UART.gState = HAL_UART_STATE_READY; // Принудительно сбрасываем состояние HAL
+    if ((tjc_tx_busy != 0U) || (tjc_tx_len == 0U)) {
+        irq_restore(primask);
+        return 0U;
     }
+
+    uint8_t *const send_buf = tjc_active_buf;
+    const uint16_t send_len = tjc_tx_len;
+
+    if (HAL_UART_Transmit_IT(&TJC_UART, send_buf, send_len) == HAL_OK) {
+        tjc_active_buf = (send_buf == tjc_tx_buf_a) ? tjc_tx_buf_b : tjc_tx_buf_a;
+        tjc_tx_len = 0U;
+        tjc_tx_busy = 1U;
+        irq_restore(primask);
+        return 1U;
+    }
+
+    /* The caller keeps its state and formats a new complete batch on retry.
+       Never retain an untransmittable partial batch beside future commands. */
+    tjc_tx_len = 0U;
+    tjc_tx_error_count++;
+    irq_restore(primask);
+    return 0U;
 }
 
 uint8_t tjc_tx_is_busy(void)
@@ -133,158 +159,235 @@ uint8_t tjc_tx_is_busy(void)
     return tjc_tx_busy;
 }
 
-void tjc_send_string(char* str) {
-    while(str != NULL && *str != 0) {
-        uart_send_char(*str++);
-    }
-    uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
+/* Drop only bytes queued in the inactive software buffer. The active UART
+   transfer, if any, is never modified. It is used before an addt sequence,
+   where raw graph data must directly follow the display's 0xFE response. */
+void tjc_discard_pending_tx(void)
+{
+    const uint32_t primask = irq_save_disable();
+    tjc_tx_len = 0U;
+    tjc_tx_overflow = 0U;
+    irq_restore(primask);
 }
 
-void tjc_send_txt(char* objname, char* attribute, char* txt) {
+void tjc_send_string(char *str)
+{
+    uart_send_string(str);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
+}
+
+void tjc_send_txt(char *objname, char *attribute, char *txt)
+{
     uart_send_string(objname);
     uart_send_char('.');
     uart_send_string(attribute);
     uart_send_string("=\"");
     uart_send_string(txt);
     uart_send_char('\"');
-    uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
 }
 
-void tjc_send_val(char* objname, char* attribute, int val) {
+void tjc_send_val(char *objname, char *attribute, int val)
+{
+    char txt[12];
+
     uart_send_string(objname);
     uart_send_char('.');
     uart_send_string(attribute);
     uart_send_char('=');
-    char txt[12]="";
     intToStr(val, txt);
     uart_send_string(txt);
-    uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
 }
 
-void tjc_send_nstring(char* str, unsigned char str_length) {
-    for (int var = 0; var < str_length; ++var) {
-        uart_send_char(*str++);
+void tjc_send_nstring(char *str, unsigned char str_length)
+{
+    if (str == NULL) {
+        return;
     }
-    uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
+
+    for (unsigned char index = 0U; index < str_length; ++index) {
+        uart_send_char(str[index]);
+    }
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
+    uart_send_char((char)0xFF);
 }
 
-/* ----------------------- Start implementation -----------------------------*/
-
+/* ----------------------- FreeModbus serial port ---------------------------*/
 void vMBPortSerialEnable(BOOL xRxEnable, BOOL xTxEnable)
 {
-  if (xRxEnable == FALSE) {
-    HAL_UART_AbortReceive_IT(modbusUart);
-  } else {
-    HAL_UART_Receive_IT(modbusUart, &rxByte, 1);
-  }
-
-  if (xTxEnable == FALSE) {
-    HAL_UART_AbortTransmit_IT(modbusUart);
-  } else {
-    if (modbusUart->gState == HAL_UART_STATE_READY) {
-      prvvUARTTxReadyISR();
+    if (modbusUart == NULL) {
+        return;
     }
-  }
+
+    if (xRxEnable == FALSE) {
+        (void)HAL_UART_AbortReceive_IT(modbusUart);
+    } else {
+        (void)HAL_UART_Receive_IT(modbusUart, &rxByte, 1U);
+    }
+
+    if (xTxEnable == FALSE) {
+        (void)HAL_UART_AbortTransmit_IT(modbusUart);
+    } else if (modbusUart->gState == HAL_UART_STATE_READY) {
+        prvvUARTTxReadyISR();
+    }
 }
 
-BOOL xMBPortSerialInit(UCHAR ucPORT, ULONG ulBaudRate, UCHAR ucDataBits, eMBParity eParity) {
+BOOL xMBPortSerialInit(UCHAR ucPORT, ULONG ulBaudRate, UCHAR ucDataBits,
+                       eMBParity eParity)
+{
+    (void)ucPORT;
+
+    if (modbusUart == NULL) {
+        return FALSE;
+    }
+
+    if ((modbusUart->Init.BaudRate != ulBaudRate) ||
+        (ucDataBits != 8U) ||
+        (eParity != MB_PAR_NONE)) {
+        /* USART1 is configured by CubeMX as 8N1. Do not claim that a
+           different runtime request was applied when it was not. */
+        return FALSE;
+    }
+
     return TRUE;
 }
 
-BOOL xMBPortSerialPutByte(CHAR ucByte) {
-  txByte = ucByte;
-  HAL_UART_Transmit_IT(modbusUart, &txByte, 1);
-  return TRUE;
-}
-
-BOOL xMBPortSerialGetByte(CHAR * pucByte) {
-  *pucByte = rxByte;
-  return TRUE;
-}
-
-static void prvvUARTTxReadyISR(void) { pxMBFrameCBTransmitterEmpty(); }
-static void prvvUARTRxISR(void) { pxMBFrameCBByteReceived(); }
-
-void initRingBuffer(void) {
-    uint32_t primask = mb_irq_save_disable();
-    ringBuffer.Head = 0;
-    ringBuffer.Tail = 0;
-    ringBuffer.Length = 0;
-    mb_irq_restore(primask);
-}
-
-void write1ByteToRingBuffer(uint8_t data) {
-    uint32_t primask = mb_irq_save_disable();
-    if(ringBuffer.Length >= RINGBUFFER_LEN) {
-        mb_irq_restore(primask);
-        return;
+BOOL xMBPortSerialPutByte(CHAR ucByte)
+{
+    if (modbusUart == NULL) {
+        return FALSE;
     }
-    ringBuffer.Ring_data[ringBuffer.Tail] = data;
-    ringBuffer.Tail = (ringBuffer.Tail + 1) % RINGBUFFER_LEN;
-    ringBuffer.Length++;
-    mb_irq_restore(primask);
+
+    txByte = (uint8_t)ucByte;
+    return (HAL_UART_Transmit_IT(modbusUart, &txByte, 1U) == HAL_OK) ? TRUE : FALSE;
 }
 
-void deleteRingBuffer(uint16_t size) {
-    uint32_t primask = mb_irq_save_disable();
-    if(size >= ringBuffer.Length) {
-        ringBuffer.Head = 0;
-        ringBuffer.Tail = 0;
-        ringBuffer.Length = 0;
+BOOL xMBPortSerialGetByte(CHAR *pucByte)
+{
+    if (pucByte == NULL) {
+        return FALSE;
+    }
+
+    *pucByte = (CHAR)rxByte;
+    return TRUE;
+}
+
+static void prvvUARTTxReadyISR(void)
+{
+    (void)pxMBFrameCBTransmitterEmpty();
+}
+
+static void prvvUARTRxISR(void)
+{
+    (void)pxMBFrameCBByteReceived();
+}
+
+/* ----------------------- TJC RX ring buffer -------------------------------*/
+void initRingBuffer(void)
+{
+    const uint32_t primask = irq_save_disable();
+    ringBuffer.Head = 0U;
+    ringBuffer.Tail = 0U;
+    ringBuffer.Length = 0U;
+    irq_restore(primask);
+}
+
+void write1ByteToRingBuffer(uint8_t data)
+{
+    const uint32_t primask = irq_save_disable();
+
+    if (ringBuffer.Length < RINGBUFFER_LEN) {
+        ringBuffer.Ring_data[ringBuffer.Tail] = data;
+        ringBuffer.Tail = (uint16_t)((ringBuffer.Tail + 1U) % RINGBUFFER_LEN);
+        ringBuffer.Length++;
+    }
+
+    irq_restore(primask);
+}
+
+void deleteRingBuffer(uint16_t size)
+{
+    const uint32_t primask = irq_save_disable();
+
+    if (size >= ringBuffer.Length) {
+        ringBuffer.Head = 0U;
+        ringBuffer.Tail = 0U;
+        ringBuffer.Length = 0U;
     } else {
-        for(int i = 0; i < size; i++) {
-            ringBuffer.Head = (ringBuffer.Head + 1) % RINGBUFFER_LEN;
-            ringBuffer.Length--;
-        }
+        ringBuffer.Head = (uint16_t)((ringBuffer.Head + size) % RINGBUFFER_LEN);
+        ringBuffer.Length = (uint16_t)(ringBuffer.Length - size);
     }
-    mb_irq_restore(primask);
+
+    irq_restore(primask);
 }
 
-uint8_t read1ByteFromRingBuffer(uint16_t position) {
-    uint32_t primask = mb_irq_save_disable();
-    uint8_t value = 0;
-    // Добавлена проверка: нельзя читать данные, которых нет в буфере
+uint8_t read1ByteFromRingBuffer(uint16_t position)
+{
+    const uint32_t primask = irq_save_disable();
+    uint8_t value = 0U;
+
     if (position < ringBuffer.Length) {
-        uint16_t realPosition = (ringBuffer.Head + position) % RINGBUFFER_LEN;
+        const uint16_t realPosition =
+            (uint16_t)((ringBuffer.Head + position) % RINGBUFFER_LEN);
         value = ringBuffer.Ring_data[realPosition];
     }
-    mb_irq_restore(primask);
+
+    irq_restore(primask);
     return value;
 }
 
-uint16_t getRingBufferLength() {
-    uint32_t primask = mb_irq_save_disable();
-    uint16_t length = ringBuffer.Length;
-    mb_irq_restore(primask);
+uint16_t getRingBufferLength(void)
+{
+    const uint32_t primask = irq_save_disable();
+    const uint16_t length = ringBuffer.Length;
+    irq_restore(primask);
     return length;
 }
 
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart->Instance == modbusUart->Instance) {
-    prvvUARTTxReadyISR();
-  } else if (huart->Instance == TJC_UART_INS) {
-    tjc_tx_busy = 0;
-  }
+/* ----------------------- HAL callbacks ------------------------------------*/
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if ((modbusUart != NULL) && (huart->Instance == modbusUart->Instance)) {
+        prvvUARTTxReadyISR();
+    } else if (huart->Instance == TJC_UART_INS) {
+        tjc_tx_busy = 0U;
+    }
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart->Instance == modbusUart->Instance) {
-    prvvUARTRxISR();
-    HAL_UART_Receive_IT(modbusUart, &rxByte, 1);
-  } else if(huart->Instance == TJC_UART_INS) {
-    write1ByteToRingBuffer(RxBuffer[0]);
-    HAL_UART_Receive_IT(&TJC_UART, RxBuffer, 1);
-  }
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if ((modbusUart != NULL) && (huart->Instance == modbusUart->Instance)) {
+        prvvUARTRxISR();
+        (void)HAL_UART_Receive_IT(modbusUart, &rxByte, 1U);
+    } else if (huart->Instance == TJC_UART_INS) {
+        write1ByteToRingBuffer(RxBuffer[0]);
+        (void)HAL_UART_Receive_IT(&TJC_UART, RxBuffer, 1U);
+    }
 }
 
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-  if (huart->Instance == modbusUart->Instance) {
-    HAL_UART_AbortReceive_IT(modbusUart);
-    HAL_UART_Receive_IT(modbusUart, &rxByte, 1);
-  } else if (huart->Instance == TJC_UART_INS) {
-    // При ошибке UART (например, Overrun) сбрасываем флаги, чтобы не зависнуть
-    tjc_tx_busy = 0;
-    HAL_UART_AbortReceive_IT(&TJC_UART);
-    HAL_UART_Receive_IT(&TJC_UART, RxBuffer, 1);
-  }
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if ((modbusUart != NULL) && (huart->Instance == modbusUart->Instance)) {
+        (void)HAL_UART_AbortReceive_IT(modbusUart);
+        (void)HAL_UART_Receive_IT(modbusUart, &rxByte, 1U);
+    } else if (huart->Instance == TJC_UART_INS) {
+        /* A receive error must not release a still active TJC transmission. */
+        (void)HAL_UART_AbortReceive_IT(&TJC_UART);
+        (void)HAL_UART_Receive_IT(&TJC_UART, RxBuffer, 1U);
+
+        /* If HAL has returned the transmitter to READY after an error, no
+           completion callback will arrive, so permit a queued retry. */
+        if ((tjc_tx_busy != 0U) && (huart->gState == HAL_UART_STATE_READY)) {
+            tjc_tx_busy = 0U;
+            tjc_tx_error_count++;
+        }
+    }
 }

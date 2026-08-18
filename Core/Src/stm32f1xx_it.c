@@ -31,7 +31,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SIZE 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -41,8 +40,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-extern volatile uint16_t input_buffer_A[SIZE];
-extern volatile uint16_t input_buffer_B[SIZE];
+/* Keep peripheral IRQ handlers free of application-state mutations. */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -209,12 +207,7 @@ void SysTick_Handler(void)
 void DMA1_Channel1_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
-    // Прерывание от DMA1_Channel1 (TIM4_CH1 -> Порт B)
-    if (__HAL_DMA_GET_FLAG(&hdma_tim4_ch1, DMA_FLAG_TC1)) {
-        __HAL_DMA_CLEAR_FLAG(&hdma_tim4_ch1, DMA_FLAG_TC1);
-        // Перезапускаем DMA в циклическом режиме
-        HAL_DMA_Start(&hdma_tim4_ch1, (uint32_t)&GPIOB->IDR, (uint32_t)input_buffer_B, SIZE);
-    }
+  /* TIM4_CH1 DMA runs in circular mode. Do not restart it from TC IRQ. */
   /* USER CODE END DMA1_Channel1_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_tim4_ch1);
   /* USER CODE BEGIN DMA1_Channel1_IRQn 1 */
@@ -228,12 +221,7 @@ void DMA1_Channel1_IRQHandler(void)
 void DMA1_Channel7_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel7_IRQn 0 */
-    // Прерывание от DMA1_Channel7 (TIM4_UPDATE -> Порт A)
-    if (__HAL_DMA_GET_FLAG(&hdma_tim4_up, DMA_FLAG_TC7)) {
-        __HAL_DMA_CLEAR_FLAG(&hdma_tim4_up, DMA_FLAG_TC7);
-        // Перезапускаем DMA в циклическом режиме
-        HAL_DMA_Start(&hdma_tim4_up, (uint32_t)&GPIOA->IDR, (uint32_t)input_buffer_A, SIZE);
-    }
+  /* TIM4_UP DMA runs in circular mode. Do not restart it from TC IRQ. */
   /* USER CODE END DMA1_Channel7_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_tim4_up);
   /* USER CODE BEGIN DMA1_Channel7_IRQn 1 */
@@ -247,7 +235,7 @@ void DMA1_Channel7_IRQHandler(void)
 void TIM3_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM3_IRQn 0 */
-
+  /* HAL dispatches only the short FreeModbus timer-expiry callback. */
   /* USER CODE END TIM3_IRQn 0 */
   HAL_TIM_IRQHandler(&htim3);
   /* USER CODE BEGIN TIM3_IRQn 1 */
@@ -261,7 +249,7 @@ void TIM3_IRQHandler(void)
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
-
+  /* Modbus RX/TX callbacks are dispatched by HAL; do no polling here. */
   /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);
   /* USER CODE BEGIN USART1_IRQn 1 */
@@ -275,7 +263,7 @@ void USART1_IRQHandler(void)
 void USART3_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_IRQn 0 */
-
+  /* TJC byte RX/TX callbacks are dispatched by HAL; no parsing in IRQ. */
   /* USER CODE END USART3_IRQn 0 */
   HAL_UART_IRQHandler(&huart3);
   /* USER CODE BEGIN USART3_IRQn 1 */

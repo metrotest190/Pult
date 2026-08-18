@@ -13,6 +13,8 @@
 #include "mt_port.h"
 #include "tjc_usart_hmi.h"
 #include <stdbool.h>
+#include <math.h>
+#include <limits.h>
 #define SIZE 1
 /* USER CODE END Includes */
 
@@ -108,6 +110,13 @@ static uint8_t redraw_queue = 0;
 static int8_t current_redraw_ch = -1;
 static uint8_t addt_busy = 0;
 
+/* These flags are set only by ProcessTjcRx(), which is called from the main
+   loop. The USART3 IRQ only appends bytes to the ring buffer. */
+static uint8_t tjc_addt_fe_received = 0;
+static uint8_t tjc_addt_fd_received = 0;
+static uint8_t tjc_rx_parser_state = 0;
+static uint8_t tjc_rx_command_channel = 0;
+
 // Глобальные zoom и offset (перенесены из функции)
 static float zoom[3] = {1.0f, 1.0f, 1.0f};
 static float offset[3] = {0.0f, 0.0f, 0.0f};
@@ -146,49 +155,149 @@ static void MX_USART1_UART_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
+static void TjcCommunicationInit(void);
 extern void intToStr(int num, char* str);
 extern void uart_send_char(char ch);
 extern void uart_send_string(char* str);
 extern void ProcessButtons(void);
 extern void ProcessEncoder(uint16_t current_B_raw);
-extern void tjc_flush_tx(void);
+extern uint8_t tjc_flush_tx(void);
 extern uint8_t tjc_tx_is_busy(void);
+extern void tjc_discard_pending_tx(void);
 
-// === ДОБАВЬТЕ ЭТУ ФУНКЦИЮ СЮДА (ПЕРЕД SwitchTechnology_Logic) ===
-void ParseTjcCommands(void) {
-    while (getRingBufferLength() >= 4) {
-        if (read1ByteFromRingBuffer(0) == TJC_CMD_HEADER_0 &&
-            read1ByteFromRingBuffer(1) == TJC_CMD_HEADER_1) {
+/*
+ * The RX ring buffer has exactly one consumer.  TJC control frames are
+ * decoded here, while 0xFE/0xFD answers for addt are retained as flags.
+ * Consequently, an interface command that arrives while addt is pending is
+ * no longer discarded byte by byte by a second consumer.
+ */
+/*
+ * Reset the complete software RX state before arming USART3. It is called
+ * once after MX_USART3_UART_Init() and may be reused after a deliberate TJC
+ * communication recovery.
+ */
+static void TjcCommunicationInit(void)
+{
+    initRingBuffer();
+    tjc_rx_parser_state = 0U;
+    tjc_rx_command_channel = 0U;
+    tjc_addt_fe_received = 0U;
+    tjc_addt_fd_received = 0U;
 
-            uint8_t ch   = read1ByteFromRingBuffer(2);
-            uint8_t state = read1ByteFromRingBuffer(3);
+    /* HAL_UART_RxCpltCallback() rearms this one-byte reception continuously. */
+    if (HAL_UART_Receive_IT(&TJC_UART, RxBuffer, 1U) != HAL_OK) {
+        Error_Handler();
+    }
+}
 
-            if (ch <= 2) {
-                uint8_t old_flags = tjc_visible_flags;
+static void ProcessTjcRx(void)
+{
+    while (getRingBufferLength() != 0U) {
+        const uint8_t byte = read1ByteFromRingBuffer(0U);
+        deleteRingBuffer(1U);
 
-                if (state) {
-                    tjc_visible_flags |= (1 << ch);
-                    if (!(old_flags & (1 << ch))) {
-                        redraw_queue |= (1 << ch);
-                    }
-                } else {
-                    tjc_visible_flags &= ~(1 << ch);
+        switch (tjc_rx_parser_state) {
+        case 0U:
+            if (byte == TJC_CMD_HEADER_0) {
+                tjc_rx_parser_state = 1U;
+            } else if (byte == 0xFEU) {
+                tjc_addt_fe_received = 1U;
+            } else if (byte == 0xFDU) {
+                tjc_addt_fd_received = 1U;
+            }
+            break;
+
+        case 1U:
+            if (byte == TJC_CMD_HEADER_1) {
+                tjc_rx_parser_state = 2U;
+            } else if (byte == TJC_CMD_HEADER_0) {
+                /* It can be the first byte of a new frame. */
+                tjc_rx_parser_state = 1U;
+            } else {
+                tjc_rx_parser_state = 0U;
+                if (byte == 0xFEU) {
+                    tjc_addt_fe_received = 1U;
+                } else if (byte == 0xFDU) {
+                    tjc_addt_fd_received = 1U;
                 }
             }
-            deleteRingBuffer(4);
-        } else {
-            deleteRingBuffer(1);
+            break;
+
+        case 2U:
+            tjc_rx_command_channel = byte;
+            tjc_rx_parser_state = 3U;
+            break;
+
+        default: /* tjc_rx_parser_state == 3 */
+            if (tjc_rx_command_channel <= 2U) {
+                const uint8_t mask =
+                    (uint8_t)(1U << tjc_rx_command_channel);
+                const uint8_t old_flags = tjc_visible_flags;
+
+                if (byte != 0U) {
+                    tjc_visible_flags |= mask;
+                    if ((old_flags & mask) == 0U) {
+                        redraw_queue |= mask;
+                    }
+                } else {
+                    tjc_visible_flags &= (uint8_t)~mask;
+                }
+            }
+            tjc_rx_parser_state = 0U;
+            break;
         }
     }
+}
+
+static float SanitiseFloat(float value)
+{
+    return isfinite(value) ? value : 0.0f;
+}
+
+static int FloatToTenths(float value)
+{
+    if (!isfinite(value)) {
+        return 0;
+    }
+    if (value >= ((float)INT_MAX / 10.0f)) {
+        return INT_MAX;
+    }
+    if (value <= ((float)INT_MIN / 10.0f)) {
+        return INT_MIN;
+    }
+    return (int)(value * 10.0f);
+}
+
+static uint8_t GraphValueToByte(float value, float channel_offset,
+                                float channel_zoom, int channel)
+{
+    if (!isfinite(value) || !isfinite(channel_offset) ||
+        !isfinite(channel_zoom)) {
+        return 128U;
+    }
+
+    const float scaled = (value - channel_offset) * channel_zoom;
+    if (scaled >= (float)(127 - channel)) {
+        return 255U;
+    }
+    if (scaled <= (float)(-128 - channel)) {
+        return 0U;
+    }
+    return (uint8_t)(128 + (int)scaled + channel);
 }
 void SwitchTechnology_Logic(void) {
     char txt_buf[12];
     static uint32_t lastSendTime = 0;
-    float vals[3] = {holdingFloat0.f, holdingFloat1.f, holdingFloat2.f};
+    float vals[3] = {
+        SanitiseFloat(holdingFloat0.f),
+        SanitiseFloat(holdingFloat1.f),
+        SanitiseFloat(holdingFloat2.f)
+    };
     static uint32_t addt_timeout = 0;
 
     ProcessButtons();
-    eMBPoll();
+    (void)eMBPoll();
+    ProcessTjcRx();
 
     switch (currentState) {
         case STATE_POWER_ON:
@@ -249,10 +358,10 @@ void SwitchTechnology_Logic(void) {
                 }
             }
 
-            tjc_send_val("x0", "val", (int)((holdingFloat0.f) * 10));
-            tjc_send_val("x1", "val", (int)((holdingFloat1.f) * 10));
-            tjc_send_val("x2", "val", (int)((holdingFloat2.f) * 10));
-            tjc_send_val("x3", "val", (int)(holdingFloat3.f * 10));
+            tjc_send_val("x0", "val", FloatToTenths(holdingFloat0.f));
+            tjc_send_val("x1", "val", FloatToTenths(holdingFloat1.f));
+            tjc_send_val("x2", "val", FloatToTenths(holdingFloat2.f));
+            tjc_send_val("x3", "val", FloatToTenths(holdingFloat3.f));
 
             {
                 char num_str[6];
@@ -272,30 +381,33 @@ void SwitchTechnology_Logic(void) {
                     }
                     // ИСПРАВЛЕНИЕ: Пока ждёт перерисовки, НЕ ОТПРАВЛЯЕМ add! Иначе будут смешаны масштабы.
                 } else {
-                    float scaled_val = (vals[i] - offset[i]) * zoom[i];
-                    int val = 128 + (int)scaled_val + i;
-                    if (val < 0) val = 0;
-                    if (val > 255) val = 255;
+                    const uint8_t graph_value =
+                        GraphValueToByte(vals[i], offset[i], zoom[i], i);
 
                     uart_send_string("add 1,");
                     intToStr(i, txt_buf);
                     uart_send_string(txt_buf);
                     uart_send_char(',');
-                    intToStr(val, txt_buf);
+                    intToStr((int)graph_value, txt_buf);
                     uart_send_string(txt_buf);
                     uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
                 }
             }
 
-            tjc_flush_tx();
-            lastSendTime = HAL_GetTick();
-            currentState = STATE_SCREEN_POLLING;
+            if (tjc_flush_tx() != 0U) {
+                lastSendTime = HAL_GetTick();
+                currentState = STATE_SCREEN_POLLING;
+            }
             break;
         }
 
         // --- Неблокирующий процесс addt ---
         case STATE_ADDT_SEND_CMD:
             if (tjc_tx_is_busy()) break;
+            /* addt owns the TJC serial stream. Discard normal draw commands
+               queued before the state transition; raw graph bytes must not be
+               delayed behind them. */
+            tjc_discard_pending_tx();
             if (!(tjc_visible_flags & (1 << current_redraw_ch)) || graph_count[current_redraw_ch] == 0) {
                 addt_busy = 0;
                 currentState = STATE_SCREEN_POLLING;
@@ -315,52 +427,48 @@ void SwitchTechnology_Logic(void) {
             uart_send_string(txt_buf);
             uart_send_char(0xff); uart_send_char(0xff); uart_send_char(0xff);
 
-            tjc_flush_tx();
-            addt_timeout = HAL_GetTick();
-            currentState = STATE_ADDT_WAIT_FE;
+            tjc_addt_fe_received = 0U;
+            tjc_addt_fd_received = 0U;
+            if (tjc_flush_tx() != 0U) {
+                addt_timeout = HAL_GetTick();
+                currentState = STATE_ADDT_WAIT_FE;
+            }
             break;
 
         case STATE_ADDT_WAIT_FE:
-        {
-            uint16_t len = getRingBufferLength();
-            if (len > 0) {
-                if (read1ByteFromRingBuffer(0) == 0xFE) {
-                    // ИСПРАВЛЕНИЕ: удаляем только 0xFE, сохраняя команды экрана (0x55 0xAA)
-                    deleteRingBuffer(1);
-                    currentState = STATE_ADDT_SEND_DATA;
-                } else {
-                    deleteRingBuffer(1);
-                }
-            } else if (HAL_GetTick() - addt_timeout > 200) {
-                deleteRingBuffer(len);
-                addt_busy = 0;
+            if (tjc_addt_fe_received != 0U) {
+                tjc_addt_fe_received = 0U;
+                currentState = STATE_ADDT_SEND_DATA;
+            } else if ((HAL_GetTick() - addt_timeout) > 200U) {
+                addt_busy = 0U;
                 currentState = STATE_SCREEN_POLLING;
             }
             break;
-        }
 
         case STATE_ADDT_SEND_DATA:
             if (tjc_tx_is_busy()) break;
             for (int i = 0; i < graph_count[current_redraw_ch]; i++) {
-                uint16_t idx = (graph_head[current_redraw_ch] - graph_count[current_redraw_ch] + i + HISTORY_LEN) % HISTORY_LEN;
-                float v = (graph_history[current_redraw_ch][idx] - offset[current_redraw_ch]) * zoom[current_redraw_ch];
-                int val = 128 + (int)v + current_redraw_ch;
-                if (val < 0) val = 0;
-                if (val > 255) val = 255;
-                uart_send_char((char)val);
+                const uint16_t idx = (uint16_t)((graph_head[current_redraw_ch] -
+                    graph_count[current_redraw_ch] + i + HISTORY_LEN) % HISTORY_LEN);
+                const uint8_t graph_value = GraphValueToByte(
+                    graph_history[current_redraw_ch][idx],
+                    offset[current_redraw_ch], zoom[current_redraw_ch],
+                    current_redraw_ch);
+                uart_send_char((char)graph_value);
             }
-            tjc_flush_tx();
-            addt_timeout = HAL_GetTick();
-            currentState = STATE_ADDT_WAIT_DATA_DONE;
+            if (tjc_flush_tx() != 0U) {
+                addt_timeout = HAL_GetTick();
+                currentState = STATE_ADDT_WAIT_DATA_DONE;
+            }
             break;
 
         case STATE_ADDT_WAIT_DATA_DONE:
-            if (!tjc_tx_is_busy()) {
-                addt_busy = 1; // Данные ушли, ждем 0xFD в фоне
+            if (tjc_tx_is_busy() == 0U) {
+                addt_busy = 1U; /* Data has been sent; wait for 0xFD. */
                 addt_timeout = HAL_GetTick();
                 currentState = STATE_SCREEN_POLLING;
-            } else if (HAL_GetTick() - addt_timeout > 500) {
-                addt_busy = 0;
+            } else if ((HAL_GetTick() - addt_timeout) > 500U) {
+                addt_busy = 0U;
                 currentState = STATE_SCREEN_POLLING;
             }
             break;
@@ -368,30 +476,23 @@ void SwitchTechnology_Logic(void) {
         // --- Фоновые задачи ---
         case STATE_SCREEN_POLLING:
         {
-            if (addt_busy) {
-                uint16_t len = getRingBufferLength();
-                if (len > 0) {
-                    if (read1ByteFromRingBuffer(0) == 0xFD) {
-                        // ИСПРАВЛЕНИЕ: удаляем только 0xFD, сохраняя команды экрана
-                        deleteRingBuffer(1);
-                        addt_busy = 0; // Экран свободен
-                        lastSendTime = HAL_GetTick(); // Синхронизируем таймер
-                    } else {
-                        deleteRingBuffer(1);
-                    }
-                } else if (HAL_GetTick() - addt_timeout > 1000) {
-                    addt_busy = 0; // Таймаут
+            if (addt_busy != 0U) {
+                if (tjc_addt_fd_received != 0U) {
+                    tjc_addt_fd_received = 0U;
+                    addt_busy = 0U;
+                    lastSendTime = HAL_GetTick();
+                } else if ((HAL_GetTick() - addt_timeout) > 1000U) {
+                    addt_busy = 0U;
+                } else {
+                    /* Do not start a normal screen update while addt owns the
+                       display buffer, but keep processing TJC RX above. */
+                    break;
                 }
-                // ИСПРАВЛЕНИЕ: Строго запрещаем STATE_SEND_TO_SCREEN пока addt_busy!
-                break;
             }
 
-            // ИСПРАВЛЕНИЕ: Парсер вызывается только тут! Безопасно для 0xFE/0xFD.
-            ParseTjcCommands();
-
-            if (redraw_queue > 0) {
-                current_redraw_ch = __builtin_ctz(redraw_queue);
-                redraw_queue &= ~(1 << current_redraw_ch);
+            if (redraw_queue != 0U) {
+                current_redraw_ch = (int8_t)__builtin_ctz((unsigned int)redraw_queue);
+                redraw_queue &= (uint8_t)~(1U << current_redraw_ch);
                 currentState = STATE_ADDT_SEND_CMD;
                 break;
             }
@@ -448,6 +549,10 @@ int main(void)
     MT_PORT_SetTimerModule(&htim3);
     MT_PORT_SetUartModule(&huart1);
 
+    /* USART3 and its NVIC are ready after MX_USART3_UART_Init(). Clear the
+       ring buffer and arm RX before the main loop or any TJC TX command. */
+    TjcCommunicationInit();
+
     eMBErrorCode eStatus;
     eStatus = eMBInit(MB_RTU, 0x0A, 0, 115200, MB_PAR_NONE);
     if (eStatus != MB_ENOERR) {
@@ -458,30 +563,29 @@ int main(void)
         Error_Handler();
     }
 
-    initRingBuffer();
-    if (HAL_UART_Receive_IT(&TJC_UART, RxBuffer, 1) != HAL_OK) {
-        Error_Handler();
-    }
 
     usRegHoldingBuf[0] = 255;
 
-    // === ИСПРАВЛЕНИЕ: циклический режим DMA для непрерывного чтения портов ===
-    // Запускаем DMA для порта A (TIM4_UPDATE)
-    HAL_DMA_Start(&hdma_tim4_up, (uint32_t)&GPIOA->IDR, (uint32_t)input_buffer_A, SIZE);
+    /* TIM4 DMA channels are configured by CubeMX in DMA_CIRCULAR mode.
+       A length-one transfer captures GPIO IDR at every TIM4 event; it is
+       repeated by DMA hardware and must not be restarted from DMA TC IRQ. */
+    if (HAL_DMA_Start(&hdma_tim4_up, (uint32_t)&GPIOA->IDR,
+                      (uint32_t)input_buffer_A, SIZE) != HAL_OK) {
+        Error_Handler();
+    }
+    if (HAL_DMA_Start(&hdma_tim4_ch1, (uint32_t)&GPIOB->IDR,
+                      (uint32_t)input_buffer_B, SIZE) != HAL_OK) {
+        Error_Handler();
+    }
 
-    // Запускаем DMA для порта B (TIM4_CH1)
-    HAL_DMA_Start(&hdma_tim4_ch1, (uint32_t)&GPIOB->IDR, (uint32_t)input_buffer_B, SIZE);
-
-    // Включаем прерывания по завершении DMA для перезапуска
-    __HAL_DMA_ENABLE_IT(&hdma_tim4_up, DMA_IT_TC);
-    __HAL_DMA_ENABLE_IT(&hdma_tim4_ch1, DMA_IT_TC);
-
-    // Включаем DMA запросы от таймера
+    /* No transfer-complete interrupt: the circular transfers need no CPU
+       service each 1 ms. */
     __HAL_TIM_ENABLE_DMA(&htim4, TIM_DMA_UPDATE);
     __HAL_TIM_ENABLE_DMA(&htim4, TIM_DMA_CC1);
 
-    // Запускаем таймер
-    HAL_TIM_Base_Start(&htim4);
+    if (HAL_TIM_Base_Start(&htim4) != HAL_OK) {
+        Error_Handler();
+    }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -953,13 +1057,9 @@ void ProcessButtons(void) {
             case 3:  tjc_send_val("p6", "pic", 17); break;
             case 6:
                 tjc_send_val("p6", "pic", 15);
-                // ИСПРАВЛЕНИЕ: Jog больше не сбрасывает позицию энкодера
-                fast_cmd_value = 5; fast_btn_pressed = 1;
                 break;
             case 7:
                 tjc_send_val("p6", "pic", 18);
-                // ИСПРАВЛЕНИЕ: Jog больше не сбрасывает позицию энкодера
-                fast_cmd_value = -5; fast_btn_pressed = 1;
                 break;
             case 8:  tjc_send_val("p6", "pic", 20); break;
             case 11: tjc_send_val("p6", "pic", 19); break;
@@ -969,11 +1069,20 @@ void ProcessButtons(void) {
         maskA &= (uint16_t)(maskA - 1);  // Сбрасываем младший установленный бит
     }
 
-    if (released_A & (1 << 6)) {
-        fast_cmd_value = 0; fast_btn_pressed = 0;
-    }
-    if (released_A & (1 << 7)) {
-        fast_cmd_value = 0; fast_btn_pressed = 0;
+    /* Recalculate Jog from the stable level. Releasing one direction must
+       not cancel the other direction if both buttons are held. The UP button
+       has defined priority if both signals are active simultaneously. */
+    if (((pressed_A | released_A) & ((1U << 6) | (1U << 7))) != 0U) {
+        if ((current_A & (1U << 6)) != 0U) {
+            fast_cmd_value = 5;
+            fast_btn_pressed = 1U;
+        } else if ((current_A & (1U << 7)) != 0U) {
+            fast_cmd_value = -5;
+            fast_btn_pressed = 1U;
+        } else {
+            fast_cmd_value = 0;
+            fast_btn_pressed = 0U;
+        }
     }
 
     if (released_B & (1 << 12)) {
