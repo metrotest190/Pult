@@ -558,6 +558,12 @@ int main(void)
     if (eStatus != MB_ENOERR) {
         Error_Handler();
     }
+    /* FC17 (Report Slave ID): данные должны быть заданы до eMBEnable(),
+       иначе ответ будет синтаксически корректным, но пустым. */
+    eStatus = eMBSetSlaveID(0x0A, TRUE, NULL, 0);
+    if (eStatus != MB_ENOERR) {
+        Error_Handler();
+    }
     eStatus = eMBEnable();
     if (eStatus != MB_ENOERR) {
         Error_Handler();

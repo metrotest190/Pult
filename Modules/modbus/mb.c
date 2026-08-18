@@ -234,8 +234,8 @@ eMBRegisterCB( UCHAR ucFunctionCode, pxMBFunctionHandler pxHandler )
         {
             for( i = 0; i < MB_FUNC_HANDLERS_MAX; i++ )
             {
-                if( ( xFuncHandlers[i].pxHandler == NULL ) ||
-                    ( xFuncHandlers[i].pxHandler == pxHandler ) )
+                if( ( xFuncHandlers[i].ucFunctionCode == ucFunctionCode ) ||
+                    ( xFuncHandlers[i].pxHandler == NULL ) )
                 {
                     xFuncHandlers[i].ucFunctionCode = ucFunctionCode;
                     xFuncHandlers[i].pxHandler = pxHandler;
@@ -294,9 +294,19 @@ eMBEnable( void )
 
     if( eMBState == STATE_DISABLED )
     {
-        /* Activate the protocol stack. */
-        pvMBFrameStartCur(  );
-        eMBState = STATE_ENABLED;
+        /* Discard events left from a previous session before starting a
+         * new one. Without this, a stale EV_FRAME_RECEIVED/EV_EXECUTE
+         * could be processed against the new RTU session. */
+        if( xMBPortEventInit() != TRUE )
+        {
+            eStatus = MB_EPORTERR;
+        }
+        else
+        {
+            /* Activate the protocol stack. */
+            pvMBFrameStartCur(  );
+            eMBState = STATE_ENABLED;
+        }
     }
     else
     {

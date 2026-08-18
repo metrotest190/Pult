@@ -1,4 +1,4 @@
-/* 
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006-2018 Christian Walter <cwalter@embedded-solutions.at>
  * All rights reserved.
@@ -126,7 +126,9 @@ eMBFuncWriteMultipleHoldingRegister( UCHAR * pucFrame, USHORT * usLen )
 
         if( ( usRegCount >= 1 ) &&
             ( usRegCount <= MB_PDU_FUNC_WRITE_MUL_REGCNT_MAX ) &&
-            ( ucRegByteCount == ( UCHAR ) ( 2 * usRegCount ) ) )
+            ( ucRegByteCount == ( UCHAR )( 2U * usRegCount ) ) &&
+            ( *usLen == ( USHORT )( MB_PDU_FUNC_WRITE_MUL_VALUES_OFF +
+                                     ucRegByteCount ) ) )
         {
             /* Make callback to update the register values. */
             eRegStatus =
@@ -182,7 +184,7 @@ eMBFuncReadHoldingRegister( UCHAR * pucFrame, USHORT * usLen )
         usRegCount |= ( USHORT )( pucFrame[MB_PDU_FUNC_READ_REGCNT_OFF + 1] );
 
         /* Check if the number of registers to read is valid. If not
-         * return Modbus illegal data value exception. 
+         * return Modbus illegal data value exception.
          */
         if( ( usRegCount >= 1 ) && ( usRegCount <= MB_PDU_FUNC_READ_REGCNT_MAX ) )
         {
@@ -258,7 +260,9 @@ eMBFuncReadWriteMultipleHoldingRegister( UCHAR * pucFrame, USHORT * usLen )
 
         if( ( usRegReadCount >= 1 ) && ( usRegReadCount <= 0x7D ) &&
             ( usRegWriteCount >= 1 ) && ( usRegWriteCount <= 0x79 ) &&
-            ( ( 2 * usRegWriteCount ) == ucRegWriteByteCount ) )
+            ( ( 2U * usRegWriteCount ) == ucRegWriteByteCount ) &&
+            ( *usLen == ( USHORT )( MB_PDU_FUNC_READWRITE_WRITE_VALUES_OFF +
+                                     ucRegWriteByteCount ) ) )
         {
             /* Make callback to update the register values. */
             eRegStatus = eMBRegHoldingCB( &pucFrame[MB_PDU_FUNC_READWRITE_WRITE_VALUES_OFF],

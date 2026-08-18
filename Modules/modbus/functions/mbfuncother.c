@@ -1,4 +1,4 @@
-/* 
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006-2018 Christian Walter <cwalter@embedded-solutions.at>
  * All rights reserved.
@@ -52,35 +52,40 @@ eMBErrorCode
 eMBSetSlaveID( UCHAR ucSlaveID, BOOL xIsRunning,
                UCHAR const *pucAdditional, USHORT usAdditionalLen )
 {
-    eMBErrorCode    eStatus = MB_ENOERR;
+    /* The buffer stores Slave ID, run status and optional additional data. */
+    if( usAdditionalLen > ( MB_FUNC_OTHER_REP_SLAVEID_BUF - 2U ) )
+    {
+        return MB_ENORES;
+    }
+    if( ( usAdditionalLen != 0U ) && ( pucAdditional == NULL ) )
+    {
+        return MB_EINVAL;
+    }
 
-    /* the first byte and second byte in the buffer is reserved for
-     * the parameter ucSlaveID and the running flag. The rest of
-     * the buffer is available for additional data. */
-    if( usAdditionalLen + 2 < MB_FUNC_OTHER_REP_SLAVEID_BUF )
+    ucMBSlaveID[0] = ucSlaveID;
+    ucMBSlaveID[1] = ( UCHAR )( xIsRunning ? 0xFFU : 0x00U );
+    if( usAdditionalLen != 0U )
     {
-        usMBSlaveIDLen = 0;
-        ucMBSlaveID[usMBSlaveIDLen++] = ucSlaveID;
-        ucMBSlaveID[usMBSlaveIDLen++] = ( UCHAR )( xIsRunning ? 0xFF : 0x00 );
-        if( usAdditionalLen > 0 )
-        {
-            memcpy( &ucMBSlaveID[usMBSlaveIDLen], pucAdditional,
-                    ( size_t )usAdditionalLen );
-            usMBSlaveIDLen += usAdditionalLen;
-        }
+        memcpy( &ucMBSlaveID[2], pucAdditional, ( size_t )usAdditionalLen );
     }
-    else
-    {
-        eStatus = MB_ENORES;
-    }
-    return eStatus;
+    usMBSlaveIDLen = ( USHORT )( usAdditionalLen + 2U );
+
+    return MB_ENOERR;
 }
 
 eMBException
 eMBFuncReportSlaveID( UCHAR * pucFrame, USHORT * usLen )
 {
-    memcpy( &pucFrame[MB_PDU_DATA_OFF], &ucMBSlaveID[0], ( size_t )usMBSlaveIDLen );
-    *usLen = ( USHORT )( MB_PDU_DATA_OFF + usMBSlaveIDLen );
+    /* FC17 response: function code, byte count, Slave ID payload. The
+       response is written into the same buffer that held the request, so
+       the function code must be written explicitly and not be relied on
+       to survive from the request frame. */
+    pucFrame[MB_PDU_FUNC_OFF] = MB_FUNC_OTHER_REPORT_SLAVEID;
+    pucFrame[MB_PDU_DATA_OFF] = ( UCHAR )usMBSlaveIDLen;
+    memcpy( &pucFrame[MB_PDU_DATA_OFF + 1U], &ucMBSlaveID[0],
+            ( size_t )usMBSlaveIDLen );
+    *usLen = ( USHORT )( MB_PDU_DATA_OFF + 1U + usMBSlaveIDLen );
+
     return MB_EX_NONE;
 }
 

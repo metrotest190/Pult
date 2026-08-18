@@ -464,6 +464,19 @@ def cmd_test(m, args):
     except Exception as e:
         results.append(check_ok("Чужой адрес slave игнорируется", False, str(e)))
 
+    # 9. FC17 Report Slave ID (нужен eMBSetSlaveID до eMBEnable в прошивке)
+    try:
+        data, rtt = m.transact(0x11, b"", "FC17")
+        bc = data[0]
+        slave_id = data[1]
+        run = data[2] if len(data) > 2 else 0
+        ok = bc >= 2 and slave_id == m.addr
+        results.append(check_ok("FC17 Report Slave ID", ok,
+                                f"bytecount={bc} slaveID=0x{slave_id:02X} "
+                                f"run=0x{run:02X} RTT {rtt:.2f} мс"))
+    except (TimeoutError, ModbusError) as e:
+        results.append(check_ok("FC17 Report Slave ID", False, str(e)))
+
     passed = sum(1 for _, ok, _ in results if ok)
     print(f"\nИтог: {passed}/{len(results)} прошло")
     return 0 if passed == len(results) else 1

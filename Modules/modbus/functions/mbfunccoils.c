@@ -1,4 +1,4 @@
-/* 
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006-2018 Christian Walter <cwalter@embedded-solutions.at>
  * All rights reserved.
@@ -84,10 +84,10 @@ eMBFuncReadCoils( UCHAR * pucFrame, USHORT * usLen )
         usCoilCount |= ( USHORT )( pucFrame[MB_PDU_FUNC_READ_COILCNT_OFF + 1] );
 
         /* Check if the number of registers to read is valid. If not
-         * return Modbus illegal data value exception. 
+         * return Modbus illegal data value exception.
          */
         if( ( usCoilCount >= 1 ) &&
-            ( usCoilCount < MB_PDU_FUNC_READ_COILCNT_MAX ) )
+            ( usCoilCount <= MB_PDU_FUNC_READ_COILCNT_MAX ) )
         {
             /* Set the current PDU data pointer to the beginning. */
             pucFrameCur = &pucFrame[MB_PDU_FUNC_OFF];
@@ -122,9 +122,9 @@ eMBFuncReadCoils( UCHAR * pucFrame, USHORT * usLen )
             else
             {
                 /* The response contains the function code, the starting address
-                 * and the quantity of registers. We reuse the old values in the 
+                 * and the quantity of registers. We reuse the old values in the
                  * buffer because they are still valid. */
-                *usLen += ucNBytes;;
+                *usLen += ucNBytes;
             }
         }
         else
@@ -206,7 +206,8 @@ eMBFuncWriteMultipleCoils( UCHAR * pucFrame, USHORT * usLen )
     eMBException    eStatus = MB_EX_NONE;
     eMBErrorCode    eRegStatus;
 
-    if( *usLen > ( MB_PDU_FUNC_WRITE_SIZE + MB_PDU_SIZE_MIN ) )
+    /* The request must include the byte-count field before it is read. */
+    if( *usLen >= MB_PDU_FUNC_WRITE_MUL_VALUES_OFF )
     {
         usRegAddress = ( USHORT )( pucFrame[MB_PDU_FUNC_WRITE_MUL_ADDR_OFF] << 8 );
         usRegAddress |= ( USHORT )( pucFrame[MB_PDU_FUNC_WRITE_MUL_ADDR_OFF + 1] );
@@ -228,7 +229,9 @@ eMBFuncWriteMultipleCoils( UCHAR * pucFrame, USHORT * usLen )
 
         if( ( usCoilCnt >= 1 ) &&
             ( usCoilCnt <= MB_PDU_FUNC_WRITE_MUL_COILCNT_MAX ) &&
-            ( ucByteCountVerify == ucByteCount ) )
+            ( ucByteCountVerify == ucByteCount ) &&
+            ( *usLen == ( USHORT )( MB_PDU_FUNC_WRITE_MUL_VALUES_OFF +
+                                     ucByteCount ) ) )
         {
             eRegStatus =
                 eMBRegCoilsCB( &pucFrame[MB_PDU_FUNC_WRITE_MUL_VALUES_OFF],
@@ -242,7 +245,7 @@ eMBFuncWriteMultipleCoils( UCHAR * pucFrame, USHORT * usLen )
             else
             {
                 /* The response contains the function code, the starting address
-                 * and the quantity of registers. We reuse the old values in the 
+                 * and the quantity of registers. We reuse the old values in the
                  * buffer because they are still valid. */
                 *usLen = MB_PDU_FUNC_WRITE_MUL_BYTECNT_OFF;
             }

@@ -97,7 +97,7 @@ eMBRTUInit( UCHAR ucSlaveAddress, UCHAR ucPort, ULONG ulBaudRate, eMBParity ePar
          */
         if( ulBaudRate > 19200 )
         {
-            usTimerT35_50us = 35;       /* 1800us. */
+            usTimerT35_50us = 35;       /* 1750us. */
         }
         else
         {
@@ -152,7 +152,7 @@ eMBRTUReceive( UCHAR * pucRcvAddress, UCHAR ** pucFrame, USHORT * pusLength )
     eMBErrorCode    eStatus = MB_ENOERR;
 
     ENTER_CRITICAL_SECTION(  );
-    assert( usRcvBufferPos < MB_SER_PDU_SIZE_MAX );
+    assert( usRcvBufferPos <= MB_SER_PDU_SIZE_MAX );
 
     /* Length and CRC check */
     if( ( usRcvBufferPos >= MB_SER_PDU_SIZE_MIN )
@@ -299,9 +299,21 @@ xMBRTUTransmitFSM( void )
         /* check if we are finished. */
         if( usSndBufferCount != 0 )
         {
-            xMBPortSerialPutByte( ( CHAR )*pucSndBufferCur );
-            pucSndBufferCur++;  /* next byte in sendbuffer. */
-            usSndBufferCount--;
+            if( xMBPortSerialPutByte( ( CHAR )*pucSndBufferCur ) == TRUE )
+            {
+                pucSndBufferCur++;  /* next byte in sendbuffer. */
+                usSndBufferCount--;
+            }
+            else
+            {
+                /* The byte was not accepted by the UART (HAL_BUSY or error).
+                 * Do not consume it: there will be no TX-complete callback.
+                 * Abort the transmission and re-enable reception. */
+                usSndBufferCount = 0;
+                eSndState = STATE_TX_IDLE;
+                vMBPortSerialEnable( TRUE, FALSE );
+                /* TODO: increment a project diagnostic counter here. */
+            }
         }
         else
         {
