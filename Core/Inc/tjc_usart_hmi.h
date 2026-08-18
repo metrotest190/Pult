@@ -20,6 +20,7 @@ void tjc_send_txt(char* objname, char* attribute, char* txt);
 void tjc_send_val(char* objname, char* attribute, int val);
 void tjc_send_nstring(char* str, unsigned char str_length);
 uint8_t tjc_flush_tx(void);
+uint16_t tjc_diag_status(void);
 uint8_t tjc_tx_is_busy(void);
 void tjc_discard_pending_tx(void);
 void initRingBuffer(void);

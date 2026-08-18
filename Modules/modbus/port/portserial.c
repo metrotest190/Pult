@@ -159,6 +159,27 @@ uint8_t tjc_tx_is_busy(void)
     return tjc_tx_busy;
 }
 
+/* Диагностика TJC для Modbus-регистра 0x3000:
+   бит0 = tjc_tx_busy (застрял = экран не обновляется),
+   бит1 = tjc_tx_overflow (дроп пачек команд),
+   биты 8..15 = tjc_tx_error_count (клип 255). */
+uint16_t tjc_diag_status(void)
+{
+    uint16_t status = 0U;
+    if (tjc_tx_busy != 0U) {
+        status |= 0x0001U;
+    }
+    if (tjc_tx_overflow != 0U) {
+        status |= 0x0002U;
+    }
+    if (tjc_tx_error_count > 255U) {
+        status |= 0xFF00U;
+    } else {
+        status |= (uint16_t)((tjc_tx_error_count & 0xFFU) << 8);
+    }
+    return status;
+}
+
 /* Drop only bytes queued in the inactive software buffer. The active UART
    transfer, if any, is never modified. It is used before an addt sequence,
    where raw graph data must directly follow the display's 0xFE response. */

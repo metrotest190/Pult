@@ -336,21 +336,33 @@ def cmd_raw(m, args):
 
 
 def cmd_emulate(m, args):
-    """Эмуляция машины: циклически пишет float-каналы и читает кнопки."""
+    """Эмуляция машины: циклически пишет float-каналы и читает кнопки.
+    Все три канала — треугольник 0..amp, каждый последующий сдвинут на
+    delay секунд; канал3 — время."""
     log = open(args.log, "w", encoding="utf-8") if args.log else None
     if log:
         log.write("time_ms;rtt_ms;inA;inB;enc;ch0;ch1;ch2;ch3\n")
     n = 0
     dt = args.interval
-    print(f"Эмуляция машины: шаг {dt} c, канал0 = {args.pos0} + n*{args.dpos}, "
-          f"канал1 = {args.amp}*sin(2π*{args.freq}*t)+{args.offset}. Ctrl+C — выход.")
+
+    def tri_wave(t, period, amp):
+        half = t % period
+        if half < period / 2.0:
+            return amp * 2.0 * half / period
+        return amp * 2.0 * (period - half) / period
+
+    print(f"Эмуляция машины: шаг {dt} c | все каналы треугольник 0..{args.amp:g} "
+          f"(период {args.period:g} c), задержка канала i = {args.delay:g}*i c. "
+          f"Ctrl+C — выход.")
     try:
         while True:
             t = n * dt
-            pos = args.pos0 + n * args.dpos
-            force = args.offset + args.amp * math.sin(2 * math.pi * args.freq * t)
-            deform = pos * args.deform_k
-            vals = [pos, force, deform, t]
+            vals = [
+                tri_wave(t - 0.0 * args.delay, args.period, args.amp),
+                tri_wave(t - 1.0 * args.delay, args.period, args.amp),
+                tri_wave(t - 2.0 * args.delay, args.period, args.amp),
+                t,
+            ]
             t0 = time.monotonic()
             try:
                 rtts = []
@@ -360,13 +372,21 @@ def cmd_emulate(m, args):
                 inp, rtt = m.read_input(0x4000, 3)
                 ia, ib, enc = struct.unpack(">3H", inp)
                 rtts.append(rtt)
+                # Диагностика TJC (0x3000): бит0=busy, бит1=overflow, биты8-15=err
+                try:
+                    diag, rtt2 = m.read_holding(0x3000, 1)
+                    d = struct.unpack(">H", diag)[0]
+                    rtts.append(rtt2)
+                except Exception:
+                    d = 0
+                diag_txt = f"tjc busy={d & 1} ovf={1 if d & 2 else 0} err={(d >> 8) & 0xFF}"
                 ta = time.strftime("%H:%M:%S") + f".{int((time.monotonic()-t0)*1000)%1000:03d}"
-                print(f"{ta}  pos={pos:9.3f}  force={force:9.3f}  def={deform:9.3f}  t={t:6.1f}  "
+                print(f"{ta}  pos={vals[0]:9.3f}  force={vals[1]:9.3f}  def={vals[2]:9.3f}  t={t:6.1f}  "
                       f"кнопки A: {decode_buttons(ia, PORTA_BITS):<22} B: {decode_buttons(ib, PORTB_BITS):<20}  "
-                      f"RTT {sum(rtts):.1f} мс")
+                      f"RTT {sum(rtts):.1f} мс  [{diag_txt}]")
                 if log:
                     log.write(f"{int(time.monotonic()*1000)};{sum(rtts):.2f};{ia};{ib};{enc};"
-                              f"{pos:.6f};{force:.6f};{deform:.6f};{t:.6f}\n")
+                              f"{vals[0]:.6f};{vals[1]:.6f};{vals[2]:.6f};{t:.6f}\n")
                     log.flush()
             except (TimeoutError, ModbusError) as e:
                 print(f"{time.strftime('%H:%M:%S')}  ОШИБКА: {e}")
@@ -584,12 +604,9 @@ def main():
 
     p = sub.add_parser("emulate", help="эмуляция машины: циклическая запись float + опрос кнопок")
     p.add_argument("--interval", type=float, default=0.1, help="период, с (по умолчанию 0.1)")
-    p.add_argument("--pos0", type=float, default=0.0, help="начальное перемещение")
-    p.add_argument("--dpos", type=float, default=0.5, help="прирост перемещения за шаг")
-    p.add_argument("--amp", type=float, default=100.0, help="амплитуда силы, Н")
-    p.add_argument("--freq", type=float, default=0.2, help="частота силы, Гц")
-    p.add_argument("--offset", type=float, default=500.0, help="смещение силы, Н")
-    p.add_argument("--deform-k", type=float, default=0.6, help="деформация = перемещение * k")
+    p.add_argument("--amp", type=float, default=100.0, help="амплитуда треугольника 0..amp (по умолчанию 100)")
+    p.add_argument("--period", type=float, default=4.0, help="период треугольника, с")
+    p.add_argument("--delay", type=float, default=1.0, help="задержка канала i, с (по умолчанию 1.0*i)")
     p.add_argument("--log", help="файл лога (CSV, utf-8)")
 
     p = sub.add_parser("test", help="автотест стека пульта (нужен подключённый пульт)")

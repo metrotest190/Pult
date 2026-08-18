@@ -254,18 +254,20 @@ static float SanitiseFloat(float value)
     return isfinite(value) ? value : 0.0f;
 }
 
-static int FloatToTenths(float value)
+/* Виджеты TJC настроены на 2 знака после запятой, поэтому на экран
+   уходят СОТЫЕ доли (value * 100). */
+static int FloatToHundredths(float value)
 {
     if (!isfinite(value)) {
         return 0;
     }
-    if (value >= ((float)INT_MAX / 10.0f)) {
+    if (value >= ((float)INT_MAX / 100.0f)) {
         return INT_MAX;
     }
-    if (value <= ((float)INT_MIN / 10.0f)) {
+    if (value <= ((float)INT_MIN / 100.0f)) {
         return INT_MIN;
     }
-    return (int)(value * 10.0f);
+    return (int)(value * 100.0f);
 }
 
 static uint8_t GraphValueToByte(float value, float channel_offset,
@@ -358,10 +360,10 @@ void SwitchTechnology_Logic(void) {
                 }
             }
 
-            tjc_send_val("x0", "val", FloatToTenths(holdingFloat0.f));
-            tjc_send_val("x1", "val", FloatToTenths(holdingFloat1.f));
-            tjc_send_val("x2", "val", FloatToTenths(holdingFloat2.f));
-            tjc_send_val("x3", "val", FloatToTenths(holdingFloat3.f));
+            tjc_send_val("x0", "val", FloatToHundredths(holdingFloat0.f));
+            tjc_send_val("x1", "val", FloatToHundredths(holdingFloat1.f));
+            tjc_send_val("x2", "val", FloatToHundredths(holdingFloat2.f));
+            tjc_send_val("x3", "val", FloatToHundredths(holdingFloat3.f));
 
             {
                 char num_str[6];
@@ -935,6 +937,16 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
 
             fast_cmd_value = val;
             fast_btn_pressed = (val != 0) ? 1 : 0;
+        }
+        return MB_ENOERR;
+    }
+
+    // 1b. Диагностический регистр 0x3000 (чтение): статус TJC
+    if (usAddress == 0x3000 && usNRegs == 1) {
+        if (eMode == MB_REG_READ) {
+            uint16_t st = tjc_diag_status();
+            *pucRegBuffer++ = (UCHAR)(st >> 8);
+            *pucRegBuffer++ = (UCHAR)(st & 0xFF);
         }
         return MB_ENOERR;
     }

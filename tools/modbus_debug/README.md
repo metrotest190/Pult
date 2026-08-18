@@ -68,8 +68,10 @@ python modbus_debug.py poll --interval 0.5 --log poll.csv
 # сырые кадры: hex TX/RX + проверка CRC + RTT (для отладки стека)
 python modbus_debug.py raw
 
-# эмуляция машины: пишет float-каналы и опрашивает кнопки (проверка графиков/дисплея пульта)
-python modbus_debug.py emulate --interval 0.1 --log emulate.csv
+# эмуляция машины: треугольник 0..100 (период 10 с = 5 с вверх + 5 с вниз),
+# каждый следующий канал сдвинут на 1 с; считывает диагностику TJC (0x3000)
+python modbus_debug.py emulate --interval 0.1 --period 10 --delay 1
+# параметры: --amp 100 --period 10 --delay 1 (задержка канала i = delay*i с)
 
 # автотест стека пульта (нужен подключённый пульт!)
 python modbus_debug.py test
