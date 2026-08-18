@@ -105,17 +105,27 @@ class ModbusRtuMaster:
             self.ser.close()
 
     def _read_frame(self, max_len: int = 256) -> bytes:
-        """Читает кадр до паузы между байтами (> 1.5 символа) или max_len."""
+        """Читает кадр: первый байт ждём с полным таймаутом (это и есть
+        время ответа slave), остаток собираем пачками через in_waiting,
+        пока данные идут; тишина 50 мс = конец кадра (надёжно для
+        переходников с порционной выдачей, напр. PL2303)."""
         buf = bytearray()
-        while len(buf) < max_len:
-            chunk = self.ser.read(64)
-            if not chunk:
-                break
-            buf += chunk
-            # пауза ~2 мс при 115200: байт ~87 мкс, кадр не длиннее ~30 байт
-            time.sleep(0.002)
-            if self.ser.in_waiting == 0:
-                break
+        b = self.ser.read(1)
+        if not b:
+            return bytes(buf)
+        buf += b
+        silence = 0.05
+        deadline = time.monotonic() + silence
+        while len(buf) < max_len and time.monotonic() < deadline:
+            n = self.ser.in_waiting
+            if n:
+                chunk = self.ser.read(min(n, max_len - len(buf)))
+                if not chunk:
+                    break
+                buf += chunk
+                deadline = time.monotonic() + silence
+            else:
+                time.sleep(0.005)
         return bytes(buf)
 
     def transact(self, fc: int, data: bytes = b"", label: str = "",
@@ -147,14 +157,16 @@ class ModbusRtuMaster:
             raise ModbusError(code)
         if rfc != fc:
             raise TimeoutError(f"неожиданная функция 0x{rfc:02X} в ответе ({label})")
-        return resp[2:], rtt
+        return resp[2:-2], rtt
 
     # --- операции ---
     def read_holding(self, reg: int, n: int = 1, raw: bool = False):
-        return self.transact(0x03, struct.pack(">HH", reg, n), f"FC03 0x{reg:04X} n={n}", raw)
+        pdu, rtt = self.transact(0x03, struct.pack(">HH", reg, n), f"FC03 0x{reg:04X} n={n}", raw)
+        return pdu[1:], rtt  # отрезаем byte-count
 
     def read_input(self, reg: int, n: int = 1, raw: bool = False):
-        return self.transact(0x04, struct.pack(">HH", reg, n), f"FC04 0x{reg:04X} n={n}", raw)
+        pdu, rtt = self.transact(0x04, struct.pack(">HH", reg, n), f"FC04 0x{reg:04X} n={n}", raw)
+        return pdu[1:], rtt  # отрезаем byte-count
 
     def write_single(self, reg: int, val: int, raw: bool = False):
         return self.transact(0x06, struct.pack(">HH", reg, val & 0xFFFF), f"FC06 0x{reg:04X}={val}", raw)
@@ -467,13 +479,18 @@ def cmd_test(m, args):
     # 9. FC17 Report Slave ID (нужен eMBSetSlaveID до eMBEnable в прошивке)
     try:
         data, rtt = m.transact(0x11, b"", "FC17")
-        bc = data[0]
-        slave_id = data[1]
-        run = data[2] if len(data) > 2 else 0
-        ok = bc >= 2 and slave_id == m.addr
-        results.append(check_ok("FC17 Report Slave ID", ok,
-                                f"bytecount={bc} slaveID=0x{slave_id:02X} "
-                                f"run=0x{run:02X} RTT {rtt:.2f} мс"))
+        if len(data) < 2:
+            results.append(check_ok("FC17 Report Slave ID", False,
+                                    f"пустой payload ({len(data)} б): похоже, "
+                                    f"старая прошивка без eMBSetSlaveID"))
+        else:
+            bc = data[0]
+            slave_id = data[1]
+            run = data[2] if len(data) > 2 else 0
+            ok = bc >= 2 and slave_id == m.addr
+            results.append(check_ok("FC17 Report Slave ID", ok,
+                                    f"bytecount={bc} slaveID=0x{slave_id:02X} "
+                                    f"run=0x{run:02X} RTT {rtt:.2f} мс"))
     except (TimeoutError, ModbusError) as e:
         results.append(check_ok("FC17 Report Slave ID", False, str(e)))
 
