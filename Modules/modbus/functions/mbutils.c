@@ -131,6 +131,10 @@ prveMBError2Exception( eMBErrorCode eErrorCode )
             eStatus = MB_EX_SLAVE_BUSY;
             break;
 
+        case MB_EINVAL:
+            eStatus = MB_EX_ILLEGAL_DATA_VALUE;
+            break;
+
         default:
             eStatus = MB_EX_SLAVE_DEVICE_FAILURE;
             break;
