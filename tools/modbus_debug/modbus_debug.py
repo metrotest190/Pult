@@ -254,6 +254,18 @@ def cmd_read(m, args):
             print(f"  0x{r:04X}  = 0x{v:04X} ({v}){extra}")
 
 
+def cmd_peak(m, args):
+    """Фиксация результата: флаг, максимум силы и соответствующие L/D."""
+    data, rtt = m.read_holding(0x3001, 7)
+    r = struct.unpack(">7H", data)
+    f = regs_to_float(r[1:3]); l = regs_to_float(r[3:5]); d = regs_to_float(r[5:7])
+    print(f"RTT {rtt:6.2f} мс")
+    print(f"  фиксация      : {'ЗАФИКСИРОВАН (результат испытания)' if r[0] else 'нет — идёт испытание'}")
+    print(f"  максимум силы : {f:.3f}")
+    print(f"  перемещение L : {l:.3f}   (в точке максимума силы)")
+    print(f"  деформация D  : {d:.3f}   (в точке максимума силы)")
+
+
 def cmd_write_float(m, args):
     regs = float_to_regs(args.value)
     base = 0x1000 + args.channel * 2
@@ -585,6 +597,8 @@ def main():
     p.add_argument("reg", type=lambda s: int(s, 0), help="адрес (0x1000 или 4096)")
     p.add_argument("n", type=int, nargs="?", default=1, help="количество регистров")
 
+    sub.add_parser("peak", help="фиксация результата: флаг + максимум F, L, D (0x3001-0x3007)")
+
     p = sub.add_parser("write-float", help="запись float в канал графика")
     p.add_argument("channel", type=int, choices=[0, 1, 2, 3], help="канал: 0=перемещение, 1=сила, 2=деформация, 3=время")
     p.add_argument("value", type=float, help="значение")
@@ -629,6 +643,8 @@ def main():
             cmd_ping(m, args)
         elif args.cmd == "read":
             cmd_read(m, args)
+        elif args.cmd == "peak":
+            cmd_peak(m, args)
         elif args.cmd == "write-float":
             cmd_write_float(m, args)
         elif args.cmd == "display":

@@ -144,6 +144,23 @@ static volatile FloatUnion_t holdingFloat2;
 static volatile FloatUnion_t holdingFloat3;
 
 static volatile uint16_t display_value = 0;
+
+/* === Фиксация результата испытания: L и D в момент максимума силы ===
+   Каналы (см. tools/modbus_debug/README.md):
+     0x1000-01 (holdingFloat0) = перемещение L
+     0x1002-03 (holdingFloat1) = сила F
+     0x1004-05 (holdingFloat2) = деформация D
+   Логика: пока сила растёт — запоминаем максимум и соответствующие ему
+   L и D. Как только сила упала после значимого максимума (срыв/разрыв) —
+   результат фиксируется и на экран больше не обновляется. */
+#define F_PEAK_MIN_FORCE   0.5f     /* ниже — испытание не началось, пик не считаем */
+#define F_PEAK_DROP_FRAC   0.02f    /* спад на 2% от максимума = срыв */
+#define F_PEAK_DROP_ABS    0.05f    /* ...но не менее этой абсолютной величины */
+
+static volatile float   f_peak_value   = 0.0f;  /* максимум силы */
+static volatile float   f_peak_l_value = 0.0f;  /* перемещение при максимуме силы */
+static volatile float   f_peak_d_value = 0.0f;  /* деформация при максимуме силы */
+static volatile uint8_t f_peak_locked  = 0U;    /* 1 = результат зафиксирован */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -287,6 +304,66 @@ static uint8_t GraphValueToByte(float value, float channel_offset,
     }
     return (uint8_t)(128 + (int)scaled + channel);
 }
+/* Записать float в два регистра (старшее слово первым) — для диагностики */
+static void PeakFloatToRegs(uint16_t *dst, float value)
+{
+    FloatUnion_t fu;
+    fu.f = SanitiseFloat(value);
+    dst[0] = (uint16_t)(fu.u32 >> 16);
+    dst[1] = (uint16_t)(fu.u32 & 0xFFFFU);
+}
+
+/* Отслеживание максимума силы и фиксация L/D в точке максимума.
+   Вызывается в ГЛАВНОМ цикле (чаще, чем обновление экрана), чтобы не
+   пропустить момент срыва. */
+static void TrackForcePeak(void)
+{
+    const float current_f = SanitiseFloat(holdingFloat1.f);  /* сила, 0x1002 */
+    const float current_l = SanitiseFloat(holdingFloat0.f);  /* перемещение, 0x1000 */
+    const float current_d = SanitiseFloat(holdingFloat2.f);  /* деформация, 0x1004 */
+
+    if (f_peak_locked != 0U) {
+        return;                     /* результат уже зафиксирован */
+    }
+
+    if (current_f > f_peak_value) {
+        f_peak_value = current_f;   /* новый максимум силы */
+    }
+
+    /* L и D берём из точки максимума. Пока сила удерживается у максимума
+       в пределах допуска срыва — продолжаем обновлять L/D: мастер может
+       присылать регистры несколькими кадрами, и тогда значения не
+       рассинхронизируются с силой. */
+    {
+        float drop = f_peak_value * F_PEAK_DROP_FRAC;
+        if (drop < F_PEAK_DROP_ABS) {
+            drop = F_PEAK_DROP_ABS;
+        }
+
+        if (current_f >= (f_peak_value - drop)) {
+            f_peak_l_value = current_l;
+            f_peak_d_value = current_d;
+            return;
+        }
+
+        /* Сила упала заметно ниже максимума. Фиксируем ТОЛЬКО если
+           испытание реально шло (максимум значимый) — иначе шум у нуля
+           замораживал бы экран. */
+        if (f_peak_value > F_PEAK_MIN_FORCE) {
+            f_peak_locked = 1U;
+        }
+    }
+}
+
+/* Сброс зафиксированного результата — перед новым испытанием */
+static void ResetForcePeak(void)
+{
+    f_peak_value   = 0.0f;
+    f_peak_l_value = 0.0f;
+    f_peak_d_value = 0.0f;
+    f_peak_locked  = 0U;
+}
+
 void SwitchTechnology_Logic(void) {
     char txt_buf[12];
     static uint32_t lastSendTime = 0;
@@ -300,6 +377,7 @@ void SwitchTechnology_Logic(void) {
     ProcessButtons();
     (void)eMBPoll();
     ProcessTjcRx();
+    TrackForcePeak();   /* фиксация L/D при максимуме силы — до отрисовки */
 
     switch (currentState) {
         case STATE_POWER_ON:
@@ -360,9 +438,11 @@ void SwitchTechnology_Logic(void) {
                 }
             }
 
-            tjc_send_val("x0", "val", FloatToHundredths(holdingFloat0.f));
-            tjc_send_val("x1", "val", FloatToHundredths(holdingFloat1.f));
-            tjc_send_val("x2", "val", FloatToHundredths(holdingFloat2.f));
+            /* После срыва показываем ЗАФИКСИРОВАННЫЙ результат испытания:
+               максимум силы и соответствующие ему перемещение L и деформацию D. */
+            tjc_send_val("x0", "val", FloatToHundredths(f_peak_locked ? f_peak_l_value : holdingFloat0.f));
+            tjc_send_val("x1", "val", FloatToHundredths(f_peak_locked ? f_peak_value   : holdingFloat1.f));
+            tjc_send_val("x2", "val", FloatToHundredths(f_peak_locked ? f_peak_d_value : holdingFloat2.f));
             tjc_send_val("x3", "val", FloatToHundredths(holdingFloat3.f));
 
             {
@@ -941,6 +1021,24 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
         return MB_ENOERR;
     }
 
+    // 1a. Диагностика фиксации результата (чтение): 0x3001 — locked,
+    //     0x3002-03 — максимум силы F, 0x3004-05 — L при максимуме, 0x3006-07 — D
+    if (usAddress >= 0x3001U && (uint16_t)(usAddress + usNRegs) <= 0x3008U) {
+        if (eMode == MB_REG_READ) {
+            const uint16_t first = (uint16_t)(usAddress - 0x3001U);
+            uint16_t diag[7];
+            diag[0] = (uint16_t)f_peak_locked;
+            PeakFloatToRegs(&diag[1], f_peak_value);
+            PeakFloatToRegs(&diag[3], f_peak_l_value);
+            PeakFloatToRegs(&diag[5], f_peak_d_value);
+            for (uint16_t i = 0; i < usNRegs; i++) {
+                *pucRegBuffer++ = (UCHAR)(diag[first + i] >> 8);
+                *pucRegBuffer++ = (UCHAR)(diag[first + i] & 0xFF);
+            }
+        }
+        return MB_ENOERR;
+    }
+
     // 1b. Диагностический регистр 0x3000 (чтение): статус TJC
     if (usAddress == 0x3000 && usNRegs == 1) {
         if (eMode == MB_REG_READ) {
@@ -1081,7 +1179,7 @@ void ProcessButtons(void) {
                 break;
             case 8:  tjc_send_val("p6", "pic", 20); break;
             case 11: tjc_send_val("p6", "pic", 19); break;
-            case 12: tjc_send_val("p6", "pic", 22); break;
+            case 12: tjc_send_val("p6", "pic", 22); ResetForcePeak(); break;
             case 15: tjc_send_val("p6", "pic", 24); break;
         }
         maskA &= (uint16_t)(maskA - 1);  // Сбрасываем младший установленный бит
@@ -1115,7 +1213,7 @@ void ProcessButtons(void) {
         switch (pin) {
             case 3:  tjc_send_val("p6", "pic", 21); break;
             case 8:  tjc_send_val("p6", "pic", 26); break;
-            case 9:  tjc_send_val("p6", "pic", 23); break;
+            case 9:  tjc_send_val("p6", "pic", 23); ResetForcePeak(); break;
             case 12: encoder_btn_pressed = 1; encoder_value = 0; break;
             case 15: tjc_send_val("p6", "pic", 16); break;
         }
