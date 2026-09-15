@@ -271,20 +271,32 @@ static float SanitiseFloat(float value)
     return isfinite(value) ? value : 0.0f;
 }
 
-/* Виджеты TJC настроены на 2 знака после запятой, поэтому на экран
-   уходят СОТЫЕ доли (value * 100). */
-static int FloatToHundredths(float value)
+/* Виджеты TJC (x0..x3) настроены на 1 знак после запятой, поэтому на экран
+   уходят ДЕСЯТЫЕ доли (value * TJC_VALUE_SCALE).
+   ВАЖНО: число знаков у виджета и этот множитель обязаны совпадать, иначе на
+   экране значения отличаются в 10 раз (проверено на стенде: 22.22 -> «222.2»,
+   когда виджет с 1 знаком, а прошивка шлёт сотые).
+   Меняется в одном месте: 1 знак -> 10, 2 знака -> 100.
+   Проверка масштаба: записать L=33.33 / F=222.22 / D=4.44 и посмотреть экран. */
+#define TJC_VALUE_DECIMALS  1
+#if (TJC_VALUE_DECIMALS == 2)
+#define TJC_VALUE_SCALE     (100.0f)
+#else
+#define TJC_VALUE_SCALE     (10.0f)
+#endif
+
+static int FloatToTjcValue(float value)
 {
     if (!isfinite(value)) {
         return 0;
     }
-    if (value >= ((float)INT_MAX / 100.0f)) {
+    if (value >= ((float)INT_MAX / TJC_VALUE_SCALE)) {
         return INT_MAX;
     }
-    if (value <= ((float)INT_MIN / 100.0f)) {
+    if (value <= ((float)INT_MIN / TJC_VALUE_SCALE)) {
         return INT_MIN;
     }
-    return (int)(value * 100.0f);
+    return (int)(value * TJC_VALUE_SCALE);
 }
 
 static uint8_t GraphValueToByte(float value, float channel_offset,
@@ -440,10 +452,10 @@ void SwitchTechnology_Logic(void) {
 
             /* После срыва показываем ЗАФИКСИРОВАННЫЙ результат испытания:
                максимум силы и соответствующие ему перемещение L и деформацию D. */
-            tjc_send_val("x0", "val", FloatToHundredths(f_peak_locked ? f_peak_l_value : holdingFloat0.f));
-            tjc_send_val("x1", "val", FloatToHundredths(f_peak_locked ? f_peak_value   : holdingFloat1.f));
-            tjc_send_val("x2", "val", FloatToHundredths(f_peak_locked ? f_peak_d_value : holdingFloat2.f));
-            tjc_send_val("x3", "val", FloatToHundredths(holdingFloat3.f));
+            tjc_send_val("x0", "val", FloatToTjcValue(f_peak_locked ? f_peak_l_value : holdingFloat0.f));
+            tjc_send_val("x1", "val", FloatToTjcValue(f_peak_locked ? f_peak_value   : holdingFloat1.f));
+            tjc_send_val("x2", "val", FloatToTjcValue(f_peak_locked ? f_peak_d_value : holdingFloat2.f));
+            tjc_send_val("x3", "val", FloatToTjcValue(holdingFloat3.f));
 
             {
                 char num_str[6];
@@ -1170,17 +1182,17 @@ void ProcessButtons(void) {
         switch (pin) {
             case 1:  break;
             case 2:  break;
-            case 3:  tjc_send_val("p6", "pic", 17); break;
+            case 3:  tjc_send_val("p6", "pic", 10); break;
             case 6:
-                tjc_send_val("p6", "pic", 15);
+                tjc_send_val("p6", "pic", 5);
                 break;
             case 7:
-                tjc_send_val("p6", "pic", 18);
+                tjc_send_val("p6", "pic", 14);
                 break;
-            case 8:  tjc_send_val("p6", "pic", 20); break;
-            case 11: tjc_send_val("p6", "pic", 19); break;
-            case 12: tjc_send_val("p6", "pic", 22); ResetForcePeak(); break;
-            case 15: tjc_send_val("p6", "pic", 24); break;
+            case 8:  tjc_send_val("p6", "pic", 11); break;
+            case 11: tjc_send_val("p6", "pic", 12); break;
+            case 12: tjc_send_val("p6", "pic", 13); ResetForcePeak(); break;
+            case 15: tjc_send_val("p6", "pic", 4); break;
         }
         maskA &= (uint16_t)(maskA - 1);  // Сбрасываем младший установленный бит
     }
@@ -1203,7 +1215,7 @@ void ProcessButtons(void) {
 
     if (released_B & (1 << 12)) {
         encoder_btn_pressed = 0; encoder_value = 0;
-        tjc_send_val("p6", "pic", 27);
+        tjc_send_val("p6", "pic", 16);
     }
 
     // === ИСПРАВЛЕНИЕ: обрабатываем ВСЕ нажатые кнопки (не только младший бит) ===
@@ -1211,11 +1223,11 @@ void ProcessButtons(void) {
     while (maskB) {
         pin = __builtin_ctz(maskB);
         switch (pin) {
-            case 3:  tjc_send_val("p6", "pic", 21); break;
-            case 8:  tjc_send_val("p6", "pic", 26); break;
-            case 9:  tjc_send_val("p6", "pic", 23); ResetForcePeak(); break;
+            case 3:  tjc_send_val("p6", "pic", 9); break;
+            case 8:  tjc_send_val("p6", "pic", 2); break;
+            case 9:  tjc_send_val("p6", "pic", 3); ResetForcePeak(); break;
             case 12: encoder_btn_pressed = 1; encoder_value = 0; break;
-            case 15: tjc_send_val("p6", "pic", 16); break;
+            case 15: tjc_send_val("p6", "pic", 8); break;
         }
         maskB &= (uint16_t)(maskB - 1);  // Сбрасываем младший установленный бит
     }
@@ -1252,13 +1264,13 @@ void ProcessEncoder(uint16_t current_B_raw) {
             case 0b0001: case 0b0111: case 0b1110: case 0b1000:
                 if (encoder_value > -5) {
                     encoder_value--;
-                    tjc_send_val("p6", "pic", 18);
+                    tjc_send_val("p6", "pic", 14);
                 }
                 break;
             case 0b0010: case 0b1011: case 0b1101: case 0b0100:
                 if (encoder_value < 5) {
                     encoder_value++;
-                    tjc_send_val("p6", "pic", 15);
+                    tjc_send_val("p6", "pic", 5);
                 }
                 break;
         }
