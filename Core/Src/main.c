@@ -1184,10 +1184,9 @@ void ProcessButtons(void) {
             case 2:  break;
             case 3:  tjc_send_val("p6", "pic", 10); break;
             case 6:
-                tjc_send_val("p6", "pic", 5);
-                break;
+                tjc_send_val("p6", "pic", 5); break;
             case 7:
-                tjc_send_val("p6", "pic", 14);
+                tjc_send_val("p6", "pic", 14); break;
                 break;
             case 8:  tjc_send_val("p6", "pic", 11); break;
             case 11: tjc_send_val("p6", "pic", 12); break;
@@ -1215,7 +1214,6 @@ void ProcessButtons(void) {
 
     if (released_B & (1 << 12)) {
         encoder_btn_pressed = 0; encoder_value = 0;
-        tjc_send_val("p6", "pic", 16);
     }
 
     // === ИСПРАВЛЕНИЕ: обрабатываем ВСЕ нажатые кнопки (не только младший бит) ===
@@ -1230,6 +1228,15 @@ void ProcessButtons(void) {
             case 15: tjc_send_val("p6", "pic", 8); break;
         }
         maskB &= (uint16_t)(maskB - 1);  // Сбрасываем младший установленный бит
+    }
+
+    /* Все кнопки отпущены (был хотя бы один нажатый -> не осталось ни одного):
+       возвращаем исходную картинку в p6 (ID 16). Так отпускание ЛЮБОЙ кнопки
+       (порт A: F1/F2/Jog/захваты/возврат/запись нуля/стоп; порт B: захваты,
+       защита, пуск, энкодер) возвращает поле в исходное состояние, а не только
+       отпускание кнопки энкодера, как было раньше. */
+    if (((last_portA | last_portB) != 0U) && ((current_A | current_B) == 0U)) {
+        tjc_send_val("p6", "pic", 16);
     }
 
     last_portA = current_A;
