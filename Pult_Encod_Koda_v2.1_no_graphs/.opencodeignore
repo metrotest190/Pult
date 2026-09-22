@@ -1,0 +1,22 @@
+﻿# ависимости и сборка
+node_modules/
+dist/
+build/
+out/
+
+# иртуальные окружения Python
+.venv/
+venv/
+ENV/
+
+# Системные файлы и кэш
+.git/
+.idea/
+.vscode/
+*.log
+
+# ольшие медиа файлы
+*.png
+*.jpg
+*.mp4
+*.zip

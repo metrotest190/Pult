@@ -1,0 +1,15 @@
+# Артефакты сборки
+Debug/
+*.o
+*.d
+*.elf
+*.map
+*.list
+*.cyclo
+*.su
+
+# Вложенные репозитории (мусор от GitHub Desktop)
+Pult/
+
+# Прочее
+.vscode/

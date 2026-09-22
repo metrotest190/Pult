@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen3.8-Flash через Puter.js</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .input-group {
+            margin: 20px 0;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            resize: vertical;
+        }
+        select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .response {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #e9ecef;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Qwen3.8-Flash через Puter.js</h1>
+        
+        <div class="input-group">
+            <label for="model">Модель:</label>
+            <select id="model">
+                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                <option value="gpt-4">GPT-4</option>
+                <option value="claude-3-sonnet">Claude 3 Sonnet</option>
+                <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                <option value="gemini-flash">Gemini Flash</option>
+            </select>
+        </div>
+        
+        <div class="input-group">
+            <label for="message">Сообщение:</label>
+            <textarea id="message" placeholder="Введите ваше сообщение...">Привет! Расскажи о себе одним предложением.</textarea>
+        </div>
+        
+        <div class="input-group">
+            <button onclick="sendMessage()">Отправить</button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <p>⏳ Загрузка...</p>
+        </div>
+        
+        <div id="response" class="response" style="display: none;">
+            <h3>Ответ:</h3>
+            <p id="responseText"></p>
+        </div>
+        
+        <div id="error" class="error" style="display: none;"></div>
+        
+        <div class="stats">
+            <h3>📊 Статистика:</h3>
+            <p id="statsText">Нет статистики</p>
+        </div>
+    </div>
+
+    <script src="https://js.puter.com/v2/"></script>
+    <script>
+        let requestCount = 0;
+        
+        async function sendMessage() {
+            const message = document.getElementById('message').value;
+            const model = document.getElementById('model').value;
+            const loading = document.getElementById('loading');
+            const response = document.getElementById('response');
+            const responseText = document.getElementById('responseText');
+            const errorDiv = document.getElementById('error');
+            
+            if (!message.trim()) {
+                showError('Пожалуйста, введите сообщение');
+                return;
+            }
+            
+            // Скрыть предыдущие ответы и ошибки
+            response.style.display = 'none';
+            errorDiv.style.display = 'none';
+            
+            // Показать загрузку
+            loading.style.display = 'block';
+            
+            try {
+                requestCount++;
+                
+                // Используем Puter.js для отправки запроса
+                const result = await puter.ai.chat(message, { 
+                    model: model,
+                    testMode: true // Тестовый режим без использования кредитов
+                });
+                
+                // Скрыть загрузку
+                loading.style.display = 'none';
+                
+                // Показать ответ
+                responseText.textContent = result.text || result.response || 'Нет ответа';
+                response.style.display = 'block';
+                
+                // Обновить статистику
+                updateStats();
+                
+                // Показать успех
+                showSuccess(`Запрос #${requestCount} успешно обработан`);
+                
+            } catch (error) {
+                loading.style.display = 'none';
+                showError(`Ошибка: ${error.message}`);
+            }
+        }
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+        
+        function showSuccess(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.className = 'success';
+            errorDiv.style.display = 'block';
+            
+            // Скрыть через 3 секунды
+            setTimeout(() => {
+                errorDiv.style.display = 'none';
+                errorDiv.className = 'error';
+            }, 3000);
+        }
+        
+        function updateStats() {
+            const statsText = document.getElementById('statsText');
+            statsText.innerHTML = `
+                <p>Всего запросов: ${requestCount}</p>
+                <p>Текущая модель: ${document.getElementById('model').value}</p>
+                <p>API: Puter.js (бесплатный)</p>
+            `;
+        }
+        
+        // Примеры запросов
+        const examples = [
+            "Привет! Расскажи о себе одним предложением.",
+            "Напиши функцию Python для вычисления факториала",
+            "Придумай короткую историю о роботе",
+            "Проанализируйте преимущества Python",
+            "Переведи на английский: Искусственный интеллект"
+        ];
+        
+        // Автозаполнение примеров
+        document.getElementById('message').addEventListener('focus', function() {
+            if (!this.value) {
+                this.value = examples[Math.floor(Math.random() * examples.length)];
+            }
+        });
+        
+        // Инициализация
+        updateStats();
+    </script>
+</body>
+</html>

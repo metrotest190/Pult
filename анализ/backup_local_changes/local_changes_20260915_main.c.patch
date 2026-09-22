@@ -1,0 +1,17 @@
+diff --git a/Core/Src/main.c b/Core/Src/main.c
+index 8b9b703..3da2f0c 100644
+--- a/Core/Src/main.c
++++ b/Core/Src/main.c
+@@ -1184,10 +1184,10 @@ void ProcessButtons(void) {
+             case 2:  break;
+             case 3:  tjc_send_val("p6", "pic", 10); break;
+             case 6:
+-                tjc_send_val("p6", "pic", 5);
++                tjc_send_val("p6", "pic", 5); break;
+                 break;
+             case 7:
+-                tjc_send_val("p6", "pic", 14);
++                tjc_send_val("p6", "pic", 14); break;
+                 break;
+             case 8:  tjc_send_val("p6", "pic", 11); break;
+             case 11: tjc_send_val("p6", "pic", 12); break;
