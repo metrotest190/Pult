@@ -11,5 +11,10 @@ Debug/
 # Вложенные репозитории (мусор от GitHub Desktop)
 Pult/
 
+# Python: кэш байткода и логи опросов отладчика
+__pycache__/
+*.pyc
+tools/modbus_debug/*.csv
+
 # Прочее
 .vscode/
