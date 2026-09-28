@@ -65,9 +65,16 @@ typedef enum {
 // Антидребезг кнопок (мс). Опрос портов TIM4/DMA — 1 кГц
 #define DEBOUNCE_MS 20
 
-// === КРИТИЧЕСКИЕ СЕКЦИИ ДЛЯ ЗАЩИТЫ ОТ ГОНОК ===
-#define CRITICAL_SECTION_ENTER() __disable_irq()
-#define CRITICAL_SECTION_EXIT()  __enable_irq()
+/* === КРИТИЧЕСКИЕ СЕКЦИИ: НЕ ИСПОЛЬЗОВАТЬ устаревшие макросы!
+   Раньше здесь были CRITICAL_SECTION_ENTER/EXIT через голый
+   __disable_irq/__enable_irq — они ломались при вложенных вызовах
+   (второй EXIT включал IRQ раньше времени). Для защиты разделяемых
+   данных ISR ↔ основной цикл используйте:
+     #include "mt_port.h"
+     EnterCriticalSection();   // учитывает вложенность по PRIMASK
+     ...
+     ExitCriticalSection();
+   Реализация: Modules/modbus/port/mt_port.c. */
 
 // === ВОЛАТИЛЬНЫЕ ПЕРЕМЕННЫЕ (общие между прерываниями и основным циклом) ===
 static volatile int16_t fast_cmd_value = 0;
@@ -121,8 +128,6 @@ static uint8_t tjc_rx_command_channel = 0;
 static float zoom[3] = {1.0f, 1.0f, 1.0f};
 static float offset[3] = {0.0f, 0.0f, 0.0f};
 
-volatile int pin;
-
 volatile uint16_t input_buffer_A[SIZE];
 volatile uint16_t input_buffer_B[SIZE];
 
@@ -132,6 +137,12 @@ uint16_t last_portB = 0;
 static uint8_t encoder_prev_state = 0;
 static uint8_t encoder_initialized = 0;
 static volatile int8_t encoder_value = 0;
+
+/* === ИСПРАВЛЕНИЕ: диагностика пропущенных переходов энкодера.
+   Счётчик невалидных transition-кодов (00->11, 01->10, 10->01, 11->00 и т. п.).
+   Для JTAG/SWD отладки доступен напрямую как глобальный символ;
+   в Modbus не выводится, чтобы не расширять карту регистров. */
+volatile uint32_t encoder_error_count = 0U;
 
 static SystemState_t currentState = STATE_POWER_ON;
 
@@ -981,7 +992,18 @@ eMBErrorCode eMBRegInputCB(UCHAR *pucRegBuffer, USHORT usAddress, USHORT usNRegs
     eMBErrorCode eStatus = MB_ENOERR;
     int iRegIndex = (int)(usAddress - REG_INPUT_START);
 
-    if (iRegIndex >= 0 && (iRegIndex + usNRegs) <= REG_INPUT_NREGS) {
+    /* === ИСПРАВЛЕНИЕ: overflow-safe проверка границ.
+       Вместо (addr + nregs <= end) с возможным 16-битным wraparound
+       проверяем отдельно диапазон адреса и его длину. */
+    if (usAddress >= REG_INPUT_START &&
+        usAddress <  REG_INPUT_START + REG_INPUT_NREGS &&
+        usNRegs > 0U &&
+        usNRegs <= REG_INPUT_START + REG_INPUT_NREGS - usAddress &&
+        iRegIndex >= 0) {
+        /* Атомарное чтение 16-битного SRAM-слова на Cortex-M3 (LDRH):
+           DMA пишет 16 бит, CPU читает 16 бит — единый bus-transaction,
+           поэтому гонка «частично обновлённое слово» здесь невозможна.
+           Критическая секция не нужна. */
         uint16_t local_A = input_buffer_A[0];
         uint16_t local_B = input_buffer_B[0];
 
@@ -1042,20 +1064,26 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
 
     // 1a. Диагностика фиксации результата (чтение): 0x3001 — locked,
     //     0x3002-03 — максимум силы F, 0x3004-05 — L при максимуме, 0x3006-07 — D
-    if (usAddress >= 0x3001U && (uint16_t)(usAddress + usNRegs) <= 0x3008U) {
-        if (eMode == MB_REG_READ) {
-            const uint16_t first = (uint16_t)(usAddress - 0x3001U);
-            uint16_t diag[7];
-            diag[0] = (uint16_t)f_peak_locked;
-            PeakFloatToRegs(&diag[1], f_peak_value);
-            PeakFloatToRegs(&diag[3], f_peak_l_value);
-            PeakFloatToRegs(&diag[5], f_peak_d_value);
-            for (uint16_t i = 0; i < usNRegs; i++) {
-                *pucRegBuffer++ = (UCHAR)(diag[first + i] >> 8);
-                *pucRegBuffer++ = (UCHAR)(diag[first + i] & 0xFF);
+    {
+        const uint16_t diag_reg_count = 7U; /* 0x3001..0x3007 включительно */
+        if (usAddress >= 0x3001U &&
+            usAddress <= 0x3001U + diag_reg_count - 1U &&
+            usNRegs > 0U &&
+            usNRegs <= (0x3001U + diag_reg_count - usAddress)) {
+            if (eMode == MB_REG_READ) {
+                const uint16_t first = (uint16_t)(usAddress - 0x3001U);
+                uint16_t diag[7];
+                diag[0] = (uint16_t)f_peak_locked;
+                PeakFloatToRegs(&diag[1], f_peak_value);
+                PeakFloatToRegs(&diag[3], f_peak_l_value);
+                PeakFloatToRegs(&diag[5], f_peak_d_value);
+                for (uint16_t i = 0; i < usNRegs; i++) {
+                    *pucRegBuffer++ = (UCHAR)(diag[first + i] >> 8);
+                    *pucRegBuffer++ = (UCHAR)(diag[first + i] & 0xFF);
+                }
             }
+            return MB_ENOERR;
         }
-        return MB_ENOERR;
     }
 
     // 1b. Диагностический регистр 0x3000 (чтение): статус TJC
@@ -1086,8 +1114,11 @@ eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
     }
 
     // 3. Обработка стандартных Holding Registers (начинаются с 0x1000)
-    if ((usAddress >= REG_HOLDING_START)
-            && (usAddress + usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS)) {
+    //    === ИСПРАВЛЕНИЕ: overflow-safe проверка границ ===
+    if (usAddress >= REG_HOLDING_START &&
+        usAddress <  REG_HOLDING_START + REG_HOLDING_NREGS &&
+        usNRegs > 0U &&
+        usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS - usAddress) {
         iRegIndex = (int) (usAddress - REG_HOLDING_START);
 
         switch (eMode) {
@@ -1143,6 +1174,10 @@ eMBErrorCode eMBRegDiscreteCB(UCHAR *pucRegBuffer, USHORT usAddress,
     return MB_ENOREG;
 }
 void ProcessButtons(void) {
+    /* Атомарное чтение 16-битных слов из DMA ring-buffer:
+       Cortex-M3 LDRH делает одну 16-битную шину-транзакцию, поэтому
+       одновременная запись DMA и чтение CPU не дают «частично обновлённого
+       слова». Критическая секция здесь не нужна. */
     uint16_t raw_A = (~input_buffer_A[0]) & PORT_A_MASK;
     uint16_t raw_B = (~input_buffer_B[0]) & PORT_B_MASK;
 
@@ -1193,7 +1228,7 @@ void ProcessButtons(void) {
     // === ИСПРАВЛЕНИЕ: обрабатываем ВСЕ нажатые кнопки (не только младший бит) ===
     uint16_t maskA = pressed_A;
     while (maskA) {
-        pin = __builtin_ctz(maskA);
+        int pin = __builtin_ctz(maskA);
         switch (pin) {
             case 1:  break;
             case 2:  break;
@@ -1234,7 +1269,7 @@ void ProcessButtons(void) {
     // === ИСПРАВЛЕНИЕ: обрабатываем ВСЕ нажатые кнопки (не только младший бит) ===
     uint16_t maskB = pressed_B;
     while (maskB) {
-        pin = __builtin_ctz(maskB);
+        int pin = __builtin_ctz(maskB);
         switch (pin) {
             case 3:  tjc_send_val("p6", "pic", 9); break;
             case 8:  tjc_send_val("p6", "pic", 2); break;
@@ -1295,6 +1330,15 @@ void ProcessEncoder(uint16_t current_B_raw) {
                     tjc_send_val("p6", "pic", 5);
                 }
                 break;
+            default:
+                /* === ИСПРАВЛЕНИЕ: пропущенный / дрянной переход энкодера.
+                   00->11, 11->00 и т. п. = проскок фазы (слишком быстрое вращение
+                   или помеха). Считаем в encoder_error_count для диагностики;
+                   изменение позиции игнорируем, чтобы не добавлялся «лишний щелчок». */
+                if (encoder_error_count < 0xFFFFFFFFU) {
+                    encoder_error_count++;
+                }
+                break;
         }
         // tjc_flush_tx() УБРАНО ОТСЮДА!
         encoder_prev_state = curr_state;
@@ -1311,8 +1355,15 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
     /* User can add his own implementation to report the HAL error return state */
     __disable_irq();
-    while (1) {
+
+    /* === ИСПРАВЛЕНИЕ: вместо вечного зависания — аппаратный сброс.
+       Краткая пауза (десятки миллисекунд циклами), чтобы отладчик успел
+       прицепиться при необходимости; затем NVIC_SystemReset() восстанавливает
+       работу пульта при случайной ошибке (DMA/UART Init и т. п.). */
+    for (volatile uint32_t i = 0U; i < 5000000U; ++i) {
+        __NOP();
     }
+    NVIC_SystemReset();
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT

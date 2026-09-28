@@ -28,6 +28,14 @@ static volatile uint8_t tjc_tx_busy;
 static volatile uint8_t tjc_tx_overflow;
 volatile uint32_t tjc_tx_error_count;
 
+/* === ИСПРАВЛЕНИЕ: диагностика переполнения TJC RX ring buffer.
+   Счётчик и sticky-флаг: на частых командах TJC (переключение видимости
+   каналов, много addt) без этого дроп байтов был невидим для диагностики. */
+static volatile uint8_t  tjc_ring_overflow_flag; /* 1 = был дроп, sticky,
+                                                    сбрасывается только
+                                                    initRingBuffer() */
+volatile uint32_t tjc_ring_overflow_count;       /* всего байтов дропнуто */
+
 /* TJC RX is produced in USART3 IRQ and consumed in the foreground. */
 typedef struct
 {
@@ -162,6 +170,8 @@ uint8_t tjc_tx_is_busy(void)
 /* Диагностика TJC для Modbus-регистра 0x3000:
    бит0 = tjc_tx_busy (застрял = экран не обновляется),
    бит1 = tjc_tx_overflow (дроп пачек команд),
+   бит2 = tjc_ring_overflow_flag (дроп RX-байтов от TJC, sticky,
+          сбрасывается initRingBuffer() / переинициализацией TJC,
    биты 8..15 = tjc_tx_error_count (клип 255). */
 uint16_t tjc_diag_status(void)
 {
@@ -171,6 +181,10 @@ uint16_t tjc_diag_status(void)
     }
     if (tjc_tx_overflow != 0U) {
         status |= 0x0002U;
+    }
+    /* === ИСПРАВЛЕНИЕ: бит2 = sticky-флаг переполнения RX ring === */
+    if (tjc_ring_overflow_flag != 0U) {
+        status |= 0x0004U;
     }
     if (tjc_tx_error_count > 255U) {
         status |= 0xFF00U;
@@ -318,6 +332,8 @@ void initRingBuffer(void)
     ringBuffer.Head = 0U;
     ringBuffer.Tail = 0U;
     ringBuffer.Length = 0U;
+    tjc_ring_overflow_flag = 0U;
+    tjc_ring_overflow_count = 0U;
     irq_restore(primask);
 }
 
@@ -329,6 +345,12 @@ void write1ByteToRingBuffer(uint8_t data)
         ringBuffer.Ring_data[ringBuffer.Tail] = data;
         ringBuffer.Tail = (uint16_t)((ringBuffer.Tail + 1U) % RINGBUFFER_LEN);
         ringBuffer.Length++;
+    } else {
+        /* === ИСПРАВЛЕНИЕ: ring overflow: не просто дроп — теперь с диагностика === */
+        tjc_ring_overflow_flag = 1U;
+        if (tjc_ring_overflow_count < 0xFFFFFFFFU) {
+            tjc_ring_overflow_count++;
+        }
     }
 
     irq_restore(primask);
