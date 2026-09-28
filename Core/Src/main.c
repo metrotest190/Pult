@@ -1236,13 +1236,14 @@ void ProcessButtons(void) {
         switch (pin) {
             case 1:  break;
             case 2:  break;
-            case 3:  tjc_send_val("p6", "pic", 10); break;
+            /* Захваты: индикация только в p1/p3, поле p6 не трогаем. */
+            case 3:  tjc_send_val("p1", "pic", 17); break;
             case 6:
                 tjc_send_val("p6", "pic", 5); break;
             case 7:
                 tjc_send_val("p6", "pic", 14); break;
                 break;
-            case 8:  tjc_send_val("p6", "pic", 11); break;
+            case 8:  tjc_send_val("p3", "pic", 22); break;
             case 11: tjc_send_val("p6", "pic", 12); break;
             case 12: tjc_send_val("p6", "pic", 13); ResetForcePeak(); break;
             case 15: tjc_send_val("p6", "pic", 4); break;
@@ -1275,11 +1276,12 @@ void ProcessButtons(void) {
     while (maskB) {
         int pin = __builtin_ctz(maskB);
         switch (pin) {
-            case 3:  tjc_send_val("p6", "pic", 9); break;
+            /* Захваты: индикация только в p1/p3, поле p6 не трогаем. */
+            case 3:  tjc_send_val("p3", "pic", 21); break;
             case 8:  tjc_send_val("p6", "pic", 2); break;
             case 9:  tjc_send_val("p6", "pic", 3); ResetForcePeak(); break;
             case 12: encoder_btn_pressed = 1; encoder_value = 0; break;
-            case 15: tjc_send_val("p6", "pic", 8); break;
+            case 15: tjc_send_val("p1", "pic", 18); break;
         }
         maskB &= (uint16_t)(maskB - 1);  // Сбрасываем младший установленный бит
     }
