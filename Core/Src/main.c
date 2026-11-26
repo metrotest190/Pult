@@ -973,7 +973,7 @@ static void MX_GPIO_Init(void)
    int16 big-endian. GET-команда возвращает текущее значение тем же кодом
    команды; незнакомые команды игнорируются. */
 #define NE_VALUE_LEN    4u
-#define NE_HW_CMD_LEN   2u
+#define NE_WORD_LEN     2u  /* 16-битное поле: int16 или u16 */
 
 static int NePayloadFloat(const ne_packet_t *pkt, float *out)
 {
@@ -986,7 +986,7 @@ static int NePayloadFloat(const ne_packet_t *pkt, float *out)
 
 static int NePayloadI16(const ne_packet_t *pkt, int16_t *out)
 {
-    if ((pkt->data == NULL) || (pkt->data_len != NE_HW_CMD_LEN)) {
+    if ((pkt->data == NULL) || (pkt->data_len != NE_WORD_LEN)) {
         return 0;
     }
     *out = (int16_t)ne_get_u16(pkt->data);
@@ -1049,7 +1049,7 @@ static void NeOnPacket(const ne_packet_t *pkt)
         break;
 
     case NE_CMD_GET_HW_CMD: {
-        uint8_t payload[NE_HW_CMD_LEN];
+        uint8_t payload[NE_WORD_LEN];
 
         ne_put_u16(payload, (uint16_t)fast_cmd_value);
         (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
@@ -1074,14 +1074,9 @@ static void NeOnPacket(const ne_packet_t *pkt)
         /* 0x4000-02: органы управления, 1 = нажато (как в старой карте,
            без антидребезга). 10 байт: A, B, энкодер, HW cmd, флаги. */
         uint8_t payload[10];
-        uint16_t flags = 0U;
-
-        if (fast_btn_pressed != 0U) {
-            flags |= 0x0001U;
-        }
-        if (encoder_btn_pressed != 0U) {
-            flags |= 0x0002U;
-        }
+        const uint16_t flags =
+            (uint16_t)((fast_btn_pressed != 0U ? 0x0001U : 0U) |
+                       (encoder_btn_pressed != 0U ? 0x0002U : 0U));
 
         ne_put_u16(payload + 0,
                    (uint16_t)((~input_buffer_A[0]) & PORT_A_INPUT_MASK));
@@ -1096,7 +1091,7 @@ static void NeOnPacket(const ne_packet_t *pkt)
 
     case NE_CMD_SET_DISPLAY_VALUE: {
         /* 0x2000: значение на экране, допустимо 0…30 (как раньше). */
-        if ((pkt->data != NULL) && (pkt->data_len == NE_HW_CMD_LEN)) {
+        if ((pkt->data != NULL) && (pkt->data_len == NE_WORD_LEN)) {
             const uint16_t value = ne_get_u16(pkt->data);
             if (value <= 30U) {
                 display_value = value;
