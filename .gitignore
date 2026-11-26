@@ -19,6 +19,10 @@ tools/modbus_debug/*.csv
 # Прочее
 .vscode/
 
+# Мусор Windows-редиректов и артефакты отладки старого протокола
+nul
+tools/modbus_debug/check_out.txt
+
 # CLI-сборка и бинарник прошивки экрана
 build/
 tools/hmi_fw/

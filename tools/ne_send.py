@@ -33,15 +33,10 @@ CMD = {
     "get-strain": 0x0100004A,
     "get-deform": 0x0100009F,
     "get-hw":     0x01000046,
-    "get-tjc-status":        0x04020000,
-    "get-peak-locked":       0x04020001,
-    "get-peak-strain":       0x04020002,
-    "get-peak-position":     0x04020003,
-    "get-peak-deformation":  0x04020004,
+    "get-diag":   0x04020000,
 }
 SET_FLOAT = ("set-pos", "set-strain", "set-deform")
 GET_FLOAT = ("get-pos", "get-strain", "get-deform")
-PEAK_FLOAT = ("get-peak-strain", "get-peak-position", "get-peak-deformation")
 
 
 def build(cmd, data=b""):
@@ -96,17 +91,18 @@ def describe(cmd, data):
     """Читаемый вид ответа пульта."""
     names = {v: k for k, v in CMD.items()}
     name = names.get(cmd, "0x%08X" % cmd)
-    if name in GET_FLOAT + PEAK_FLOAT and len(data) == 4:
+    if name in GET_FLOAT and len(data) == 4:
         return "%s -> %.4f" % (name, struct.unpack(">f", data)[0])
     if name == "get-hw" and len(data) == 2:
         return "%s -> %d" % (name, struct.unpack(">h", data)[0])
-    if name == "get-peak-locked" and len(data) == 2:
-        return "%s -> %d" % (name, struct.unpack(">H", data)[0])
-    if name == "get-tjc-status" and len(data) == 2:
-        v = struct.unpack(">H", data)[0]
+    if name == "get-diag" and len(data) == 16:
+        status, locked, force, l, d = struct.unpack(">HHfff", data)
         flags = [flag for bit, flag in ((0x01, "tx_busy"), (0x02, "tx_overflow"),
-                                       (0x04, "rx_overflow")) if v & bit]
-        return "%s -> 0x%04X (%s)" % (name, v, ", ".join(flags) or "ok")
+                                        (0x04, "rx_overflow")) if status & bit]
+        if status >> 8:
+            flags.append("tx_errors=%d" % (status >> 8))
+        return ("%s -> tjc=0x%04X (%s), locked=%d, F=%.4f, L=%.4f, D=%.4f"
+                % (name, status, ", ".join(flags) or "ok", locked, force, l, d))
     return "%s, data=%s" % (name, data.hex(" ").upper())
 
 

@@ -966,6 +966,7 @@ static void MX_GPIO_Init(void)
      0x1002-03  F (holdingFloat1)  -> NE_CMD_SET_TEST_SIGNAL_STRAIN_VALUE
      0x1004-05  D (holdingFloat2)  -> NE_CMD_SET_TEST_SIGNAL_DEFORMATION_VALUE
      0x4002     быстрая команда    -> NE_CMD_SET_HW_CMD
+     0x3000-07  статус TJC и пик F/L/D -> NE_CMD_GET_DIAG
    Формат данных: float — 4 байта IEEE 754 big-endian, HW cmd — 2 байта
    int16 big-endian. GET-команда возвращает текущее значение тем же кодом
    команды; незнакомые команды игнорируются. */
@@ -997,7 +998,6 @@ static void NeSendFloat(ne_cmd_t cmd, float value)
     ne_put_f32(payload, SanitiseFloat(value));
     (void)ne_port_send(cmd, payload, (uint16_t)sizeof(payload));
 }
-
 static void NeOnPacket(const ne_packet_t *pkt)
 {
     float value;
@@ -1050,6 +1050,20 @@ static void NeOnPacket(const ne_packet_t *pkt)
         uint8_t payload[NE_HW_CMD_LEN];
 
         ne_put_u16(payload, (uint16_t)fast_cmd_value);
+        (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
+        break;
+    }
+
+    case NE_CMD_GET_DIAG: {
+        /* 0x3000-07: статус TJC, признак фиксации и пик F/L/D
+           в том же порядке полей, что и старые Modbus-регистры (16 байт). */
+        uint8_t payload[16];
+
+        ne_put_u16(payload + 0, tjc_diag_status());
+        ne_put_u16(payload + 2, (uint16_t)((f_peak_locked != 0U) ? 1U : 0U));
+        ne_put_f32(payload + 4, SanitiseFloat(f_peak_value));
+        ne_put_f32(payload + 8, SanitiseFloat(f_peak_l_value));
+        ne_put_f32(payload + 12, SanitiseFloat(f_peak_d_value));
         (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
         break;
     }
