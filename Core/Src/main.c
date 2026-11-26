@@ -967,6 +967,8 @@ static void MX_GPIO_Init(void)
      0x1004-05  D (holdingFloat2)  -> NE_CMD_SET_TEST_SIGNAL_DEFORMATION_VALUE
      0x4002     быстрая команда    -> NE_CMD_SET_HW_CMD
      0x3000-07  статус TJC и пик F/L/D -> NE_CMD_GET_DIAG
+     0x4000-02  кнопки/энкодер/быстрая команда -> NE_CMD_GET_INPUTS
+     0x2000     значение на дисплее -> NE_CMD_SET_DISPLAY_VALUE
    Формат данных: float — 4 байта IEEE 754 big-endian, HW cmd — 2 байта
    int16 big-endian. GET-команда возвращает текущее значение тем же кодом
    команды; незнакомые команды игнорируются. */
@@ -1065,6 +1067,41 @@ static void NeOnPacket(const ne_packet_t *pkt)
         ne_put_f32(payload + 8, SanitiseFloat(f_peak_l_value));
         ne_put_f32(payload + 12, SanitiseFloat(f_peak_d_value));
         (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
+        break;
+    }
+
+    case NE_CMD_GET_INPUTS: {
+        /* 0x4000-02: органы управления, 1 = нажато (как в старой карте,
+           без антидребезга). 10 байт: A, B, энкодер, HW cmd, флаги. */
+        uint8_t payload[10];
+        uint16_t flags = 0U;
+
+        if (fast_btn_pressed != 0U) {
+            flags |= 0x0001U;
+        }
+        if (encoder_btn_pressed != 0U) {
+            flags |= 0x0002U;
+        }
+
+        ne_put_u16(payload + 0,
+                   (uint16_t)((~input_buffer_A[0]) & PORT_A_INPUT_MASK));
+        ne_put_u16(payload + 2,
+                   (uint16_t)((~input_buffer_B[0]) & PORT_B_BUTTON_MASK));
+        ne_put_u16(payload + 4, (uint16_t)encoder_value);
+        ne_put_u16(payload + 6, (uint16_t)fast_cmd_value);
+        ne_put_u16(payload + 8, flags);
+        (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
+        break;
+    }
+
+    case NE_CMD_SET_DISPLAY_VALUE: {
+        /* 0x2000: значение на экране, допустимо 0…30 (как раньше). */
+        if ((pkt->data != NULL) && (pkt->data_len == NE_HW_CMD_LEN)) {
+            const uint16_t value = ne_get_u16(pkt->data);
+            if (value <= 30U) {
+                display_value = value;
+            }
+        }
         break;
     }
 

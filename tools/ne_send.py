@@ -42,6 +42,8 @@ CMD = {
     "get-deform": 0x0100009F,
     "get-hw":     0x01000046,
     "get-diag":   0x04020000,
+    "get-inputs": 0x04020001,
+    "set-display": 0x04020002,
 }
 SET_FLOAT = ("set-pos", "set-strain", "set-deform")
 GET_FLOAT = ("get-pos", "get-strain", "get-deform")
@@ -90,6 +92,13 @@ def payload(command, value):
         if value is None:
             sys.exit("set-hw: нужно целое значение")
         return struct.pack(">h", int(value))
+    if command == "set-display":
+        if value is None:
+            sys.exit("set-display: нужно целое значение")
+        number = int(value)
+        if not 0 <= number <= 30:
+            sys.exit("set-display: допустимо 0…30, пульт проигнорирует %d" % number)
+        return struct.pack(">H", number)
     if value is not None:
         sys.exit("%s: значение не нужно" % command)
     return b""
@@ -111,6 +120,13 @@ def describe(cmd, data):
             flags.append("tx_errors=%d" % (status >> 8))
         return ("%s -> tjc=0x%04X (%s), locked=%d, F=%.4f, L=%.4f, D=%.4f"
                 % (name, status, ", ".join(flags) or "ok", locked, force, l, d))
+    if name == "get-inputs" and len(data) == 10:
+        buttons_a, buttons_b, encoder, hw_cmd, flags = struct.unpack(">HHhhH", data)
+        pressed = [flag for bit, flag in ((0x0001, "fast_btn"), (0x0002, "enc_btn"))
+                   if flags & bit]
+        return ("%s -> A=0x%04X B=0x%04X enc=%d hw=%d (%s)"
+                % (name, buttons_a, buttons_b, encoder, hw_cmd,
+                   ", ".join(pressed) or "none"))
     return "%s, data=%s" % (name, data.hex(" ").upper())
 
 
