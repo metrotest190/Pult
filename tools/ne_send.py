@@ -13,6 +13,14 @@ CRC32 — стандартный (zlib), считается по заголов�
     python -X utf8 tools/ne_send.py -p COM5 set-pos 12.5
     python -X utf8 tools/ne_send.py -p COM5 set-hw -5
     python -X utf8 tools/ne_send.py -p COM5 --read get-pos
+
+Проверка приёма пульта (ожидается: мусор/битые кадры — молчание,
+порча с --garbage — ответ, разбор после ресинхронизации):
+    python -X utf8 tools/ne_send.py -p COM5 --read get-diag --split 2
+    python -X utf8 tools/ne_send.py -p COM5 --read get-diag --garbage 8
+    python -X utf8 tools/ne_send.py -p COM5 --read get-diag --corrupt-crc
+    python -X utf8 tools/ne_send.py -p COM5 --read get-diag --bad-version
+    python -X utf8 tools/ne_send.py -p COM5 --read get-diag --truncate 8
 """
 import argparse
 import struct
@@ -106,6 +114,27 @@ def describe(cmd, data):
     return "%s, data=%s" % (name, data.hex(" ").upper())
 
 
+def corrupt(pkt, bad_version=False, bad_crc=False, garbage=0, truncate=None):
+    """Порча кадра для проверки приёмника.
+
+    Порядок важен: версия пересобирает CRC (иначе поймается не та ошибка), затем
+    портится CRC, затем кадр обрезается, затем добавляется мусор впереди.
+    Мусор не содержит пары A5 5A, чтобы не подменить стартовое слово.
+    """
+    out = pkt
+    if bad_version:
+        out = out[:2] + struct.pack(">H", VERSION + 1) + out[4:]
+        out = out[:-4] + struct.pack(">I", zlib.crc32(out[:-4]) & 0xFFFFFFFF)
+    if bad_crc:
+        out = out[:-1] + bytes([out[-1] ^ 0xFF])
+    if truncate is not None:
+        out = out[:max(0, truncate)]
+    if garbage > 0:
+        pattern = bytes((0x11, 0x22, 0x33, 0x44, 0x5A, 0x00, 0x7E, 0xA4))
+        out = (pattern * (garbage // len(pattern) + 1))[:garbage] + out
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Отправитель пакетов NeModbus (USART1, 115200 8N1)")
@@ -121,11 +150,28 @@ def main():
                     help="ожидание ответа, с (по умолчанию 1.0)")
     ap.add_argument("--repeat", type=int, default=1,
                     help="отправить пакет N раз (для set-*)")
+    ap.add_argument("--split", type=float, metavar="MS",
+                    help="слать по одному байту с паузой MS мс "
+                         "(проверка склейки пакета через границы опроса)")
+    ap.add_argument("--garbage", type=int, default=0, metavar="N",
+                    help="добавить N байт мусора перед пакетом")
+    ap.add_argument("--truncate", type=int, metavar="N",
+                    help="обрезать пакет до N байт")
+    ap.add_argument("--corrupt-crc", action="store_true",
+                    help="испортить CRC (пульт должен молчать)")
+    ap.add_argument("--bad-version", action="store_true",
+                    help="версия 0x0002 с верным CRC (пульт должен молчать)")
     args = ap.parse_args()
 
     cmd = CMD[args.command]
     pkt = build(cmd, payload(args.command, args.value))
-    print("tx: %s" % pkt.hex(" ").upper())
+    if (args.corrupt_crc or args.bad_version or args.garbage > 0
+            or args.truncate is not None):
+        pkt = corrupt(pkt, args.bad_version, args.corrupt_crc,
+                      args.garbage, args.truncate)
+        print("tx (порча кадра): %s" % pkt.hex(" ").upper())
+    else:
+        print("tx: %s" % pkt.hex(" ").upper())
 
     if args.hex:
         return
@@ -139,8 +185,14 @@ def main():
 
     with serial.Serial(args.port, args.baud, timeout=0.05) as port:
         for _ in range(max(1, args.repeat)):
-            port.write(pkt)
-            port.flush()
+            if args.split is not None:
+                for b in pkt:
+                    port.write(bytes([b]))
+                    port.flush()
+                    time.sleep(args.split / 1000.0)
+            else:
+                port.write(pkt)
+                port.flush()
         if not args.read:
             return
 
