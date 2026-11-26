@@ -2,6 +2,8 @@
 #define __TJCUSARTHMI_H__
 
 #include <stdio.h>
+#include <stdint.h>
+#include "stm32f1xx_hal.h"
 
 /**
 	��ӡ����Ļ����

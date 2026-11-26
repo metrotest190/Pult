@@ -46,16 +46,14 @@ INCLUDES := \
     -I$(ROOT_DIR)/Drivers/CMSIS/Include \
     -I$(ROOT_DIR)/Drivers/STM32F1xx_HAL_Driver/Inc \
     -I$(ROOT_DIR)/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy \
-    -I$(ROOT_DIR)/Modules/modbus/include \
-    -I$(ROOT_DIR)/Modules/modbus/port \
-    -I$(ROOT_DIR)/Modules/modbus/rtu \
-    -I$(ROOT_DIR)/Modules/modbus/functions
+    -I$(ROOT_DIR)/Modules/ne_protocol
 
 # --- Source files ---
 
 # Core/Src application code (main, it, hal_msp, syscalls, sysmem, system_stm32f1xx)
 C_SOURCES += \
     Core/Src/main.c \
+    Core/Src/tjc_usart_hmi.c \
     Core/Src/stm32f1xx_hal_msp.c \
     Core/Src/stm32f1xx_it.c \
     Core/Src/syscalls.c \
@@ -79,22 +77,10 @@ C_SOURCES += \
     Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c \
     Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c
 
-# FreeModbus RTU stack (core + RTU layer + function codes + STM32 port)
+# NeProtocol — протокол обмена с ПК (ядро + транспорт USART1)
 C_SOURCES += \
-    Modules/modbus/mb.c \
-    Modules/modbus/rtu/mbrtu.c \
-    Modules/modbus/rtu/mbcrc.c \
-    Modules/modbus/functions/mbfunccoils.c \
-    Modules/modbus/functions/mbfuncdiag.c \
-    Modules/modbus/functions/mbfuncdisc.c \
-    Modules/modbus/functions/mbfuncholding.c \
-    Modules/modbus/functions/mbfuncinput.c \
-    Modules/modbus/functions/mbfuncother.c \
-    Modules/modbus/functions/mbutils.c \
-    Modules/modbus/port/mt_port.c \
-    Modules/modbus/port/portevent.c \
-    Modules/modbus/port/portserial.c \
-    Modules/modbus/port/porttimer.c
+    Modules/ne_protocol/ne_protocol.c \
+    Modules/ne_protocol/ne_port.c
 
 # Startup assembly (STM32F103C8Tx, Cortex-M3, GCC)
 ASM_SOURCES := Core/Startup/startup_stm32f103c8tx.s

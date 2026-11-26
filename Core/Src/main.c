@@ -8,9 +8,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "mb.h"
-#include "mbport.h"
-#include "mt_port.h"
+#include "ne_port.h"
+#include "ne_protocol.h"
+#include "ne_commands.h"
 #include "tjc_usart_hmi.h"
 #include <stdbool.h>
 #include <math.h>
@@ -39,16 +39,8 @@ typedef enum {
 #define TJC_CMD_HEADER_0  0x55
 #define TJC_CMD_HEADER_1  0xAA
 
-// --- ВОЗВРАЩАЕМ ИСХОДНУЮ АДРЕСАЦИЮ ---
-#define REG_INPUT_START 0x4000
-#define REG_INPUT_NREGS 3
-
-#define REG_HOLDING_START   0x1000
-#define REG_HOLDING_NREGS   8
-
-#define REG_DISPLAY_START   0x2000
-#define REG_DISPLAY_NREGS   1
-// -------------------------------------
+// --- Адресация регистров Modbus больше не используется.
+//     Новый протокол NeModbus работает по командам (ne_commands.h). ---
 
 #define PORT_A_MASK  0x99CE
 #define PORT_A_INPUT_MASK  (PORT_A_MASK & ~((1 << 6) | (1 << 7)))
@@ -70,11 +62,11 @@ typedef enum {
    __disable_irq/__enable_irq — они ломались при вложенных вызовах
    (второй EXIT включал IRQ раньше времени). Для защиты разделяемых
    данных ISR ↔ основной цикл используйте:
-     #include "mt_port.h"
+     #include "ne_port.h"
      EnterCriticalSection();   // учитывает вложенность по PRIMASK
      ...
      ExitCriticalSection();
-   Реализация: Modules/modbus/port/mt_port.c. */
+   Реализация: Modules/ne_protocol/ne_port.c. */
 
 // === ВОЛАТИЛЬНЫЕ ПЕРЕМЕННЫЕ (общие между прерываниями и основным циклом) ===
 static volatile int16_t fast_cmd_value = 0;
@@ -146,9 +138,9 @@ volatile uint32_t encoder_error_count = 0U;
 
 static SystemState_t currentState = STATE_POWER_ON;
 
-static volatile uint16_t usRegHoldingBuf[REG_HOLDING_NREGS];
-
-// === Float переменные для Modbus (IEEE 754, 2 регистра на float) ===
+// === Float переменные обмена с ПК (IEEE 754) ===
+// Раньше писались Modbus holding-регистрами 0x1000-0x1007,
+// теперь — обработчиком команд NeModbus (NeOnPacket).
 static volatile FloatUnion_t holdingFloat0;
 static volatile FloatUnion_t holdingFloat1;
 static volatile FloatUnion_t holdingFloat2;
@@ -191,6 +183,7 @@ static void MX_TIM4_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 static void TjcCommunicationInit(void);
+static void NeOnPacket(const ne_packet_t *pkt);
 extern void intToStr(int num, char* str);
 extern void uart_send_char(char ch);
 extern void uart_send_string(char* str);
@@ -338,14 +331,6 @@ static uint8_t GraphValueToByte(float value, float channel_offset,
     }
     return (uint8_t)(128 + (int)scaled + channel);
 }
-/* Записать float в два регистра (старшее слово первым) — для диагностики */
-static void PeakFloatToRegs(uint16_t *dst, float value)
-{
-    FloatUnion_t fu;
-    fu.f = SanitiseFloat(value);
-    dst[0] = (uint16_t)(fu.u32 >> 16);
-    dst[1] = (uint16_t)(fu.u32 & 0xFFFFU);
-}
 
 /* Отслеживание максимума силы и фиксация L/D в точке максимума.
    Вызывается в ГЛАВНОМ цикле (чаще, чем обновление экрана), чтобы не
@@ -409,7 +394,7 @@ void SwitchTechnology_Logic(void) {
     static uint32_t addt_timeout = 0;
 
     ProcessButtons();
-    (void)eMBPoll();
+    ne_port_poll();
     ProcessTjcRx();
     TrackForcePeak();   /* фиксация L/D при максимуме силы — до отрисовки */
 
@@ -662,31 +647,12 @@ int main(void)
   MX_TIM4_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-    MT_PORT_SetTimerModule(&htim3);
-    MT_PORT_SetUartModule(&huart1);
-
     /* USART3 and its NVIC are ready after MX_USART3_UART_Init(). Clear the
        ring buffer and arm RX before the main loop or any TJC TX command. */
     TjcCommunicationInit();
 
-    eMBErrorCode eStatus;
-    eStatus = eMBInit(MB_RTU, 0x0A, 0, 115200, MB_PAR_NONE);
-    if (eStatus != MB_ENOERR) {
-        Error_Handler();
-    }
-    /* FC17 (Report Slave ID): данные должны быть заданы до eMBEnable(),
-       иначе ответ будет синтаксически корректным, но пустым. */
-    eStatus = eMBSetSlaveID(0x0A, TRUE, NULL, 0);
-    if (eStatus != MB_ENOERR) {
-        Error_Handler();
-    }
-    eStatus = eMBEnable();
-    if (eStatus != MB_ENOERR) {
-        Error_Handler();
-    }
-
-
-    usRegHoldingBuf[0] = 255;
+    /* USART1 — новый протокол NeModbus (вместо Modbus RTU slave 0x0A). */
+    ne_port_init(&huart1, NeOnPacket);
 
     /* TIM4 DMA channels are configured by CubeMX in DMA_CIRCULAR mode.
        A length-one transfer captures GPIO IDR at every TIM4 event; it is
@@ -992,191 +958,108 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-eMBErrorCode eMBRegInputCB(UCHAR *pucRegBuffer, USHORT usAddress, USHORT usNRegs) {
-    eMBErrorCode eStatus = MB_ENOERR;
-    int iRegIndex = (int)(usAddress - REG_INPUT_START);
+/* ------------------------------------------------------------------ */
+/*  NeModbus: обработчик команд от ПК (USART1)                        */
+/* ------------------------------------------------------------------ */
+/* Каналы экрана раньше приходили holding-регистрами Modbus:
+     0x1000-01  L (holdingFloat0)  -> NE_CMD_SET_TEST_SIGNAL_POSITION_VALUE
+     0x1002-03  F (holdingFloat1)  -> NE_CMD_SET_TEST_SIGNAL_STRAIN_VALUE
+     0x1004-05  D (holdingFloat2)  -> NE_CMD_SET_TEST_SIGNAL_DEFORMATION_VALUE
+     0x4002     быстрая команда    -> NE_CMD_SET_HW_CMD
+   Формат данных: float — 4 байта IEEE 754 big-endian, HW cmd — 2 байта
+   int16 big-endian. GET-команда возвращает текущее значение тем же кодом
+   команды; незнакомые команды игнорируются. */
+#define NE_VALUE_LEN    4u
+#define NE_HW_CMD_LEN   2u
 
-    /* === ИСПРАВЛЕНИЕ: overflow-safe проверка границ.
-       Вместо (addr + nregs <= end) с возможным 16-битным wraparound
-       проверяем отдельно диапазон адреса и его длину. */
-    if (usAddress >= REG_INPUT_START &&
-        usAddress <  REG_INPUT_START + REG_INPUT_NREGS &&
-        usNRegs > 0U &&
-        usNRegs <= REG_INPUT_START + REG_INPUT_NREGS - usAddress &&
-        iRegIndex >= 0) {
-        /* Атомарное чтение 16-битного SRAM-слова на Cortex-M3 (LDRH):
-           DMA пишет 16 бит, CPU читает 16 бит — единый bus-transaction,
-           поэтому гонка «частично обновлённое слово» здесь невозможна.
-           Критическая секция не нужна. */
-        uint16_t local_A = input_buffer_A[0];
-        uint16_t local_B = input_buffer_B[0];
-
-        while (usNRegs > 0) {
-            uint16_t usValue = 0;
-
-            if (iRegIndex == 0) {
-                usValue = (~local_A) & PORT_A_INPUT_MASK;
-            }
-            else if (iRegIndex == 1) {
-                usValue = (~local_B) & PORT_B_BUTTON_MASK;
-            }
-            else if (iRegIndex == 2) {
-                if (fast_btn_pressed) {
-                    usValue = (uint16_t)fast_cmd_value;
-                } else if (encoder_btn_pressed) {
-                    usValue = (uint16_t)encoder_value;
-                } else {
-                    usValue = 0;
-                }
-            }
-
-            *pucRegBuffer++ = (UCHAR)(usValue >> 8);
-            *pucRegBuffer++ = (UCHAR)(usValue & 0xFF);
-
-            iRegIndex++;
-            usNRegs--;
-        }
-    } else {
-        eStatus = MB_ENOREG;
-    }
-    return eStatus;
-}
-
-eMBErrorCode eMBRegHoldingCB(UCHAR *pucRegBuffer, USHORT usAddress,
-        USHORT usNRegs, eMBRegisterMode eMode) {
-    eMBErrorCode eStatus = MB_ENOERR;
-    int iRegIndex;
-
-    // 1. Специальный регистр 0x4002 — быстрая команда (int16).
-    //    ИСПРАВЛЕНИЕ: 0x4000-0x4001 существуют ТОЛЬКО в пространстве Input Registers (ф. 04);
-    //    в Holding-пространстве их нет — раньше здесь возвращались ложные нули.
-    if (usAddress == 0x4002 && usNRegs == 1) {
-        if (eMode == MB_REG_READ) {
-            int16_t val = fast_cmd_value;
-            *pucRegBuffer++ = (UCHAR)(val >> 8);
-            *pucRegBuffer++ = (UCHAR)(val & 0xFF);
-        } else {
-            uint8_t high_byte = *pucRegBuffer++;
-            uint8_t low_byte = *pucRegBuffer++;
-            int16_t val = (int16_t)((high_byte << 8) | low_byte);
-
-            fast_cmd_value = val;
-            fast_btn_pressed = (val != 0) ? 1 : 0;
-        }
-        return MB_ENOERR;
-    }
-
-    // 1a. Диагностика фиксации результата (чтение): 0x3001 — locked,
-    //     0x3002-03 — максимум силы F, 0x3004-05 — L при максимуме, 0x3006-07 — D
-    {
-        const uint16_t diag_reg_count = 7U; /* 0x3001..0x3007 включительно */
-        if (usAddress >= 0x3001U &&
-            usAddress <= 0x3001U + diag_reg_count - 1U &&
-            usNRegs > 0U &&
-            usNRegs <= (0x3001U + diag_reg_count - usAddress)) {
-            if (eMode == MB_REG_READ) {
-                const uint16_t first = (uint16_t)(usAddress - 0x3001U);
-                uint16_t diag[7];
-                diag[0] = (uint16_t)f_peak_locked;
-                PeakFloatToRegs(&diag[1], f_peak_value);
-                PeakFloatToRegs(&diag[3], f_peak_l_value);
-                PeakFloatToRegs(&diag[5], f_peak_d_value);
-                for (uint16_t i = 0; i < usNRegs; i++) {
-                    *pucRegBuffer++ = (UCHAR)(diag[first + i] >> 8);
-                    *pucRegBuffer++ = (UCHAR)(diag[first + i] & 0xFF);
-                }
-            }
-            return MB_ENOERR;
-        }
-    }
-
-    // 1b. Диагностический регистр 0x3000 (чтение): статус TJC
-    if (usAddress == 0x3000 && usNRegs == 1) {
-        if (eMode == MB_REG_READ) {
-            uint16_t st = tjc_diag_status();
-            *pucRegBuffer++ = (UCHAR)(st >> 8);
-            *pucRegBuffer++ = (UCHAR)(st & 0xFF);
-        }
-        return MB_ENOERR;
-    }
-
-    // 2. Обработка регистра дисплея 0x2000
-    if (usAddress == REG_DISPLAY_START && usNRegs == 1) {
-        if (eMode == MB_REG_READ) {
-            *pucRegBuffer++ = (UCHAR)(display_value >> 8);
-            *pucRegBuffer++ = (UCHAR)(display_value & 0xFF);
-        } else {
-            uint8_t high_byte = *pucRegBuffer++;
-            uint8_t low_byte = *pucRegBuffer++;
-            uint16_t val = (uint16_t)((high_byte << 8) | low_byte);
-
-            if (val <= 30) {
-                display_value = val;
-            }
-        }
-        return MB_ENOERR;
-    }
-
-    // 3. Обработка стандартных Holding Registers (начинаются с 0x1000)
-    //    === ИСПРАВЛЕНИЕ: overflow-safe проверка границ ===
-    if (usAddress >= REG_HOLDING_START &&
-        usAddress <  REG_HOLDING_START + REG_HOLDING_NREGS &&
-        usNRegs > 0U &&
-        usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS - usAddress) {
-        iRegIndex = (int) (usAddress - REG_HOLDING_START);
-
-        switch (eMode) {
-        case MB_REG_READ:
-            while (usNRegs > 0) {
-                *pucRegBuffer++ = (UCHAR) (usRegHoldingBuf[iRegIndex] >> 8);
-                *pucRegBuffer++ = (UCHAR) (usRegHoldingBuf[iRegIndex] & 0xFF);
-                iRegIndex++;
-                usNRegs--;
-            }
-            break;
-
-        case MB_REG_WRITE:
-        {
-            while (usNRegs > 0) {
-                uint8_t high_byte = *pucRegBuffer++;
-                uint8_t low_byte = *pucRegBuffer++;
-
-                usRegHoldingBuf[iRegIndex] = (uint16_t)((high_byte << 8) | low_byte);
-                iRegIndex++;
-                usNRegs--;
-            }
-
-            // === ИСПРАВЛЕНИЕ: после ЛЮБОЙ записи пересчитываем все float из буфера ===
-            // Раньше float обновлялся только при записи полной пары регистров,
-            // из-за чего частичная запись давала рассинхрон буфера и float.
-            holdingFloat0.u32 = ((uint32_t)usRegHoldingBuf[0] << 16) | usRegHoldingBuf[1];
-            holdingFloat1.u32 = ((uint32_t)usRegHoldingBuf[2] << 16) | usRegHoldingBuf[3];
-            holdingFloat2.u32 = ((uint32_t)usRegHoldingBuf[4] << 16) | usRegHoldingBuf[5];
-            holdingFloat3.u32 = ((uint32_t)usRegHoldingBuf[6] << 16) | usRegHoldingBuf[7];
-            break;
-        }
-        }
-    } else {
-        eStatus = MB_ENOREG;
-    }
-    return eStatus;
-}
-
-/*----------------------------------------------------------------------------*/
-eMBErrorCode eMBRegCoilsCB(UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNCoils,
-                           eMBRegisterMode eMode)
+static int NePayloadFloat(const ne_packet_t *pkt, float *out)
 {
-    // В этом проекте катушки (Coils) не используются
-    return MB_ENOREG;
+    if ((pkt->data == NULL) || (pkt->data_len != NE_VALUE_LEN)) {
+        return 0;
+    }
+    *out = SanitiseFloat(ne_get_f32(pkt->data));
+    return 1;
 }
 
-/*----------------------------------------------------------------------------*/
-eMBErrorCode eMBRegDiscreteCB(UCHAR *pucRegBuffer, USHORT usAddress,
-        USHORT usNDiscrete)
+static int NePayloadI16(const ne_packet_t *pkt, int16_t *out)
 {
-    // В этом проекте дискретные входы (Discrete Inputs) не используются
-    return MB_ENOREG;
+    if ((pkt->data == NULL) || (pkt->data_len != NE_HW_CMD_LEN)) {
+        return 0;
+    }
+    *out = (int16_t)ne_get_u16(pkt->data);
+    return 1;
 }
+
+static void NeSendFloat(ne_cmd_t cmd, float value)
+{
+    uint8_t payload[NE_VALUE_LEN];
+
+    ne_put_f32(payload, SanitiseFloat(value));
+    (void)ne_port_send(cmd, payload, (uint16_t)sizeof(payload));
+}
+
+static void NeOnPacket(const ne_packet_t *pkt)
+{
+    float value;
+    int16_t hw_cmd;
+
+    if (pkt == NULL) {
+        return;
+    }
+
+    switch (pkt->cmd) {
+    case NE_CMD_SET_TEST_SIGNAL_POSITION_VALUE:
+        if (NePayloadFloat(pkt, &value)) {
+            holdingFloat0.f = value;
+        }
+        break;
+
+    case NE_CMD_SET_TEST_SIGNAL_STRAIN_VALUE:
+        if (NePayloadFloat(pkt, &value)) {
+            holdingFloat1.f = value;
+        }
+        break;
+
+    case NE_CMD_SET_TEST_SIGNAL_DEFORMATION_VALUE:
+        if (NePayloadFloat(pkt, &value)) {
+            holdingFloat2.f = value;
+        }
+        break;
+
+    case NE_CMD_SET_HW_CMD:
+        if (NePayloadI16(pkt, &hw_cmd)) {
+            fast_cmd_value = hw_cmd;
+            /* Как и у регистра 0x4002: ненулевая команда = «нажато». */
+            fast_btn_pressed = (hw_cmd != 0) ? 1u : 0u;
+        }
+        break;
+
+    case NE_CMD_GET_TEST_SIGNAL_POSITION_VALUE:
+        NeSendFloat(pkt->cmd, holdingFloat0.f);
+        break;
+
+    case NE_CMD_GET_TEST_SIGNAL_STRAIN_VALUE:
+        NeSendFloat(pkt->cmd, holdingFloat1.f);
+        break;
+
+    case NE_CMD_GET_TEST_SIGNAL_DEFORMATION_VALUE:
+        NeSendFloat(pkt->cmd, holdingFloat2.f);
+        break;
+
+    case NE_CMD_GET_HW_CMD: {
+        uint8_t payload[NE_HW_CMD_LEN];
+
+        ne_put_u16(payload, (uint16_t)fast_cmd_value);
+        (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
+        break;
+    }
+
+    default:
+        /* Остальные команды протокола пультом не обслуживаются. */
+        break;
+    }
+}
+
 void ProcessButtons(void) {
     /* Атомарное чтение 16-битных слов из DMA ring-buffer:
        Cortex-M3 LDRH делает одну 16-битную шину-транзакцию, поэтому
