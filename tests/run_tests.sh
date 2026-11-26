@@ -30,10 +30,25 @@ BUILD=$(mktemp -d)
 trap 'rm -rf "$BUILD"' EXIT
 
 echo "CC: $CC"
-# shellcheck disable=SC2086
-$CC -std=c99 -Wall -Wextra -O2 -I "$ROOT/Modules/ne_protocol" \
-  "$ROOT/tests/test_ne_protocol.c" \
-  "$ROOT/Modules/ne_protocol/ne_protocol.c" \
-  -o "$BUILD/test_ne_protocol" || exit 2
 
-"$BUILD/test_ne_protocol"
+compile_and_run() {
+  local name=$1
+  shift
+  # shellcheck disable=SC2086
+  $CC -std=c99 -Wall -Wextra -O2 "$@" -o "$BUILD/$name" || exit 2
+  "$BUILD/$name" || exit 1
+}
+
+# Ядро протокола: без HAL вообще.
+compile_and_run test_ne_protocol \
+  -I "$ROOT/Modules/ne_protocol" \
+  "$ROOT/tests/test_ne_protocol.c" \
+  "$ROOT/Modules/ne_protocol/ne_protocol.c"
+
+# Транспорт: ne_port.c на заглушке HAL (тесты/stubs).
+compile_and_run test_ne_port \
+  -I "$ROOT/tests/stubs" -I "$ROOT/Modules/ne_protocol" \
+  "$ROOT/tests/test_ne_port.c" \
+  "$ROOT/tests/stubs/hal_stub.c" \
+  "$ROOT/Modules/ne_protocol/ne_port.c" \
+  "$ROOT/Modules/ne_protocol/ne_protocol.c"

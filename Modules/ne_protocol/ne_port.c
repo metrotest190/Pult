@@ -131,6 +131,7 @@ void ne_port_init(UART_HandleTypeDef *u, ne_packet_handler_t h)
     pkt_handler = h;
 
     ring_reset();
+    rx_acc_len = 0U;
     tx_len = 0U;
     tx_busy = 0U;
     rx_overflow_count = 0U;
