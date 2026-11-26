@@ -23,6 +23,23 @@ static uint16_t tx_len;
 static unsigned tjc_rx_calls;
 static unsigned tjc_error_calls;
 
+static uint32_t tick_ms;
+
+uint32_t HAL_GetTick(void)
+{
+    return tick_ms;
+}
+
+void stub_advance_ms(uint32_t ms)
+{
+    tick_ms += ms;
+}
+
+void stub_set_ms(uint32_t ms)
+{
+    tick_ms = ms;
+}
+
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart, uint8_t *pData,
                                       uint16_t Size)
 {

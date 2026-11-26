@@ -28,6 +28,10 @@ static uint8_t rx_buf_1;
 
 static volatile uint32_t rx_overflow_count;
 static volatile uint32_t tx_error_count;
+static volatile uint32_t crc_error_count;
+static volatile uint32_t frame_error_count;
+static volatile uint32_t rx_timeout_count;
+static uint32_t last_rx_tick;
 
 /* Критическая секция: вложенная, по PRIMASK */
 static volatile uint32_t lock_cnt;
@@ -136,6 +140,10 @@ void ne_port_init(UART_HandleTypeDef *u, ne_packet_handler_t h)
     tx_busy = 0U;
     rx_overflow_count = 0U;
     tx_error_count = 0U;
+    crc_error_count = 0U;
+    frame_error_count = 0U;
+    rx_timeout_count = 0U;
+    last_rx_tick = HAL_GetTick();
 
     /* Запуск приёма по 1 байту */
     if (HAL_UART_Receive_IT(ne_uart, &rx_buf_1, 1U) != HAL_OK) {
@@ -145,11 +153,17 @@ void ne_port_init(UART_HandleTypeDef *u, ne_packet_handler_t h)
 
 static void rx_acc_fill_from_ring(void)
 {
+    const uint16_t before = rx_acc_len;
+
     while (rx_acc_len < (uint16_t)sizeof(rx_acc)) {
         if (ring_len() == 0U) {
-            return;
+            break;
         }
         rx_acc[rx_acc_len++] = ring_pop();
+    }
+
+    if (rx_acc_len != before) {
+        last_rx_tick = HAL_GetTick();
     }
 }
 
@@ -167,6 +181,17 @@ void ne_port_poll(void)
 {
     if ((rx_acc_len == 0U) && (ring_len() == 0U)) {
         return;
+    }
+
+    /* Огрызок без продолжения: кадр, у которого заголовок обещает много
+       данных, а пришла только часть, иначе блокировал бы разбор всего,
+       что придёт следом. Непроверенное кольцо означает не простой,
+       а задержку разбора — такие байты заберут ниже. ПК повторит запрос.
+       Разность беззнаковая, поэтому переполнение HAL_GetTick не мешает. */
+    if ((rx_acc_len > 0U) && (ring_len() == 0U) &&
+        ((uint32_t)(HAL_GetTick() - last_rx_tick) >= NE_PORT_RX_IDLE_TIMEOUT_MS)) {
+        rx_acc_len = 0U;
+        rx_timeout_count++;
     }
 
     /* Если буфер полон, а пакет ещё не разобран, лишние байты остаются
@@ -192,6 +217,12 @@ void ne_port_poll(void)
                до следующего вызова. */
             break;
         } else {
+            if (status == NE_ERR_CRC) {
+                crc_error_count++;
+            }
+            if ((status == NE_ERR_VERSION) || (status == NE_ERR_TOO_BIG)) {
+                frame_error_count++;
+            }
             /* Мусор или битый пакет: искать следующее стартовое слово. */
             const int off = ne_find_start(rx_acc + pos + 1U,
                                           (size_t)(rx_acc_len - pos - 1U));
@@ -259,26 +290,37 @@ int ne_port_send_raw(const uint8_t *buf, uint16_t len)
     return (int)len;
 }
 
-uint32_t ne_port_rx_overflow_count(void)
+static uint32_t counter_get(const volatile uint32_t *counter)
 {
     const uint32_t p = ne_irq_save();
-    uint32_t c = rx_overflow_count;
+    const uint32_t value = *counter;
     ne_irq_restore(p);
-    return c;
+    return value;
+}
+
+uint32_t ne_port_rx_overflow_count(void)
+{
+    return counter_get(&rx_overflow_count);
 }
 
 uint32_t ne_port_crc_error_count(void)
 {
-    /* Счётчик не ведётся: при ошибке CRC пакет просто отбрасывается. */
-    return 0U;
+    return counter_get(&crc_error_count);
+}
+
+uint32_t ne_port_rx_timeout_count(void)
+{
+    return counter_get(&rx_timeout_count);
+}
+
+uint32_t ne_port_frame_error_count(void)
+{
+    return counter_get(&frame_error_count);
 }
 
 uint32_t ne_port_tx_error_count(void)
 {
-    const uint32_t p = ne_irq_save();
-    uint32_t c = tx_error_count;
-    ne_irq_restore(p);
-    return c;
+    return counter_get(&tx_error_count);
 }
 
 /* ================================================================== */

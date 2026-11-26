@@ -37,6 +37,9 @@ HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *huart,
                                        const uint8_t *pData, uint16_t Size);
 HAL_StatusTypeDef HAL_UART_AbortReceive_IT(UART_HandleTypeDef *huart);
 
+/* Время для таймаута приёма: подменяется из теста. */
+uint32_t HAL_GetTick(void);
+
 /* Тесты однопоточные, поэтому критическая секция — пустышка. */
 #define __disable_irq() ((void)0)
 #define __enable_irq()  ((void)0)

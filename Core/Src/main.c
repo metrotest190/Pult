@@ -1058,14 +1058,18 @@ static void NeOnPacket(const ne_packet_t *pkt)
 
     case NE_CMD_GET_DIAG: {
         /* 0x3000-07: статус TJC, признак фиксации и пик F/L/D
-           в том же порядке полей, что и старые Modbus-регистры (16 байт). */
-        uint8_t payload[16];
+           в том же порядке полей, что и старые Modbus-регистры, затем счётчики приёма (32 байта). */
+        uint8_t payload[32];
 
         ne_put_u16(payload + 0, tjc_diag_status());
         ne_put_u16(payload + 2, (uint16_t)((f_peak_locked != 0U) ? 1U : 0U));
         ne_put_f32(payload + 4, SanitiseFloat(f_peak_value));
         ne_put_f32(payload + 8, SanitiseFloat(f_peak_l_value));
         ne_put_f32(payload + 12, SanitiseFloat(f_peak_d_value));
+        ne_put_u32(payload + 16, ne_port_crc_error_count());
+        ne_put_u32(payload + 20, ne_port_rx_overflow_count());
+        ne_put_u32(payload + 24, ne_port_rx_timeout_count());
+        ne_put_u32(payload + 28, ne_port_frame_error_count());
         (void)ne_port_send(pkt->cmd, payload, (uint16_t)sizeof(payload));
         break;
     }

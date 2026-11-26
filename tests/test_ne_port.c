@@ -185,6 +185,127 @@ static void test_truncated_then_valid(void)
     CHECK_EQ(rx_cmd[0], NE_CMD_GET_MODE);
 }
 
+/* Кадр, обещающий много данных, но пришедший огрызком, блокирует разбор
+   до таймаута простоя; после сброса следующий кадр принимается. */
+static void test_stuck_fragment_times_out(void)
+{
+    uint8_t cut[256];
+    uint8_t good[64];
+    uint8_t data[NE_MAX_DATA_LEN];
+    int len_cut;
+    int len_good;
+
+    reset_transport();
+    memset(data, 0x5A, sizeof(data));
+    len_cut = ne_build_packet(cut, sizeof(cut), NE_CMD_SET_MACHINE_PARAMS,
+                              data, NE_MAX_DATA_LEN);
+    len_good = ne_build_packet(good, sizeof(good), NE_CMD_GET_DIAG, NULL, 0);
+    CHECK(len_cut == (int)(NE_MIN_PACKET_SIZE + NE_MAX_DATA_LEN));
+    CHECK(len_good > 0);
+
+    feed_poll_each(cut, NE_HEAD_SIZE);        /* только заголовок, data_len = 128 */
+    CHECK_EQ(rx_calls, 0);
+
+    /* Валидный кадр сразу за огрызком: разбор ждёт оставшиеся 132 байта. */
+    feed_poll_each(good, (size_t)len_good);
+    CHECK_EQ(rx_calls, 0);
+
+    /* Простой больше таймаута — огрызок отброшен. */
+    stub_advance_ms(NE_PORT_RX_IDLE_TIMEOUT_MS + 1U);
+    ne_port_poll();
+    CHECK(ne_port_rx_timeout_count() > 0U);
+    CHECK_EQ(rx_calls, 0);
+
+    /* Повторённый запрос после сброса проходит без проблем. */
+    feed_poll_each(good, (size_t)len_good);
+    CHECK_EQ(rx_calls, 1);
+    CHECK_EQ(rx_cmd[0], NE_CMD_GET_DIAG);
+}
+
+/* Разность тиков беззнаковая: переполнение HAL_GetTick не выглядит простым. */
+static void test_stuck_fragment_across_tick_wrap(void)
+{
+    uint8_t cut[256];
+    uint8_t good[64];
+    uint8_t data[NE_MAX_DATA_LEN];
+    uint32_t before;
+    int len_cut;
+    int len_good;
+
+    reset_transport();
+    before = ne_port_rx_timeout_count();
+    memset(data, 0x5A, sizeof(data));
+    len_cut = ne_build_packet(cut, sizeof(cut), NE_CMD_SET_MACHINE_PARAMS,
+                              data, NE_MAX_DATA_LEN);
+    len_good = ne_build_packet(good, sizeof(good), NE_CMD_GET_DIAG, NULL, 0);
+    CHECK(len_cut > 0);
+    CHECK(len_good > 0);
+
+    stub_set_ms(0xFFFFFFE0u);
+    feed_poll_each(cut, NE_HEAD_SIZE);
+    CHECK_EQ(rx_calls, 0);
+
+    /* 64 мс через ноль счётчика: меньше таймаута, сброса быть не должно. */
+    stub_advance_ms(64U);
+    ne_port_poll();
+    CHECK_EQ(ne_port_rx_timeout_count(), before);
+
+    /* Ещё 100 мс после переполнения: сброс срабатывает. */
+    stub_advance_ms(NE_PORT_RX_IDLE_TIMEOUT_MS);
+    ne_port_poll();
+    CHECK_EQ(ne_port_rx_timeout_count(), before + 1U);
+
+    feed_poll_each(good, (size_t)len_good);
+    CHECK_EQ(rx_calls, 1);
+}
+
+/* Счётчик CRC-ошибок реальный, а не заглушка. */
+static void test_crc_counter(void)
+{
+    uint8_t bad[64];
+    int len_bad;
+
+    reset_transport();
+    len_bad = ne_build_packet(bad, sizeof(bad), NE_CMD_GET_DIAG, NULL, 0);
+    CHECK(len_bad > 0);
+    bad[len_bad - 1] ^= 0xFFu;
+
+    feed_poll_each(bad, (size_t)len_bad);
+    CHECK_EQ(rx_calls, 0);
+    CHECK_EQ(ne_port_crc_error_count(), 1U);
+}
+
+/* Чужая версия и слишком большой data_len считаются отдельно от CRC. */
+static void test_frame_error_counter(void)
+{
+    uint8_t bad[64];
+    uint8_t huge[64];
+    uint32_t crc_before;
+    int len_bad;
+
+    reset_transport();
+    crc_before = ne_port_crc_error_count();
+    len_bad = ne_build_packet(bad, sizeof(bad), NE_CMD_GET_DIAG, NULL, 0);
+    CHECK(len_bad > 0);
+    memcpy(huge, bad, (size_t)len_bad);
+
+    bad[3] = 0x02u;                       /* версия 0x0002 вместо 0x0001 */
+    feed_poll_each(bad, (size_t)len_bad);
+    CHECK_EQ(ne_port_frame_error_count(), 1U);
+
+    /* Остаток отклонённого кадра может дать повторный счёт — чистим его. */
+    stub_advance_ms(NE_PORT_RX_IDLE_TIMEOUT_MS + 1U);
+    ne_port_poll();
+
+    huge[8] = 0xFFu;                      /* data_len = 0xFFFF > 128 */
+    huge[9] = 0xFFu;
+    feed_poll_each(huge, (size_t)len_bad);
+    CHECK_EQ(ne_port_frame_error_count(), 2U);
+
+    CHECK_EQ(ne_port_crc_error_count(), crc_before);
+    CHECK_EQ(rx_calls, 0);
+}
+
 /* Переполнение кольца приёма считается и не роняет транспорт. */
 static void test_rx_overflow_counter(void)
 {
@@ -235,6 +356,10 @@ int main(void)
     test_garbage_prefix();
     test_bad_crc_then_valid();
     test_truncated_then_valid();
+    test_stuck_fragment_times_out();
+    test_stuck_fragment_across_tick_wrap();
+    test_crc_counter();
+    test_frame_error_counter();
     test_rx_overflow_counter();
     test_send_path();
 

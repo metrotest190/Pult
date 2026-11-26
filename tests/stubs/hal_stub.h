@@ -21,6 +21,12 @@ uint16_t stub_tx_len(void);
 /* Имитация завершения передачи (HAL_UART_TxCpltCallback). */
 void stub_tx_complete(void);
 
+/* Виртуальное время: сдвинуть HAL_GetTick() вперёд. */
+void stub_advance_ms(uint32_t ms);
+
+/* Выставить виртуальное время (проверка переполнения счётчика). */
+void stub_set_ms(uint32_t ms);
+
 /* Сколько раз вызывались TJC-хуки (в этих тестах — ноль). */
 unsigned stub_tjc_rx_calls(void);
 unsigned stub_tjc_error_calls(void);

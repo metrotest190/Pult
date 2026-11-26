@@ -53,6 +53,12 @@ void ne_port_init(UART_HandleTypeDef *uart, ne_packet_handler_t handler);
  */
 void ne_port_poll(void);
 
+/* Пауза внутри кадра дольше этого числа миллисекунд означает, что кадр
+   недособран: накопительный буфер сбрасывается, запрос повторяют. */
+#ifndef NE_PORT_RX_IDLE_TIMEOUT_MS
+#define NE_PORT_RX_IDLE_TIMEOUT_MS    100u
+#endif
+
 /**
  * @brief Отправить пакет в USART1.
  *
@@ -70,6 +76,8 @@ int ne_port_send_raw(const uint8_t *buf, uint16_t len);
 /* ------------------------------------------------------------------ */
 uint32_t ne_port_rx_overflow_count(void);
 uint32_t ne_port_crc_error_count(void);
+uint32_t ne_port_rx_timeout_count(void);
+uint32_t ne_port_frame_error_count(void);
 uint32_t ne_port_tx_error_count(void);
 
 /* ------------------------------------------------------------------ */

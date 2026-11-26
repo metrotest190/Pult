@@ -112,14 +112,23 @@ def describe(cmd, data):
         return "%s -> %.4f" % (name, struct.unpack(">f", data)[0])
     if name == "get-hw" and len(data) == 2:
         return "%s -> %d" % (name, struct.unpack(">h", data)[0])
-    if name == "get-diag" and len(data) == 16:
-        status, locked, force, l, d = struct.unpack(">HHfff", data)
+    # 16/28/32 байта — разные поколения счётчиков приёма
+    if name == "get-diag" and len(data) in (16, 28, 32):
+        status, locked, force, l, d = struct.unpack(">HHfff", data[:16])
         flags = [flag for bit, flag in ((0x01, "tx_busy"), (0x02, "tx_overflow"),
                                         (0x04, "rx_overflow")) if status & bit]
         if status >> 8:
             flags.append("tx_errors=%d" % (status >> 8))
-        return ("%s -> tjc=0x%04X (%s), locked=%d, F=%.4f, L=%.4f, D=%.4f"
+        text = ("%s -> tjc=0x%04X (%s), locked=%d, F=%.4f, L=%.4f, D=%.4f"
                 % (name, status, ", ".join(flags) or "ok", locked, force, l, d))
+        if len(data) >= 28:
+            text += (", crc_err=%d, rx_overflow=%d, rx_timeout=%d"
+                     % struct.unpack(">III", data[16:28]))
+        else:
+            text += ", no counters (old firmware)"
+        if len(data) == 32:
+            text += ", frame_err=%d" % struct.unpack(">I", data[28:32])[0]
+        return text
     if name == "get-inputs" and len(data) == 10:
         buttons_a, buttons_b, encoder, hw_cmd, flags = struct.unpack(">HHhhH", data)
         pressed = [flag for bit, flag in ((0x0001, "fast_btn"), (0x0002, "enc_btn"))
